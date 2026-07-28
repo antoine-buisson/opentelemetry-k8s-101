@@ -16,6 +16,23 @@ and multi-team separation.
   (`platform-admin`, `auditor`, team leads).
 - **Automated fake telemetry**: a tiny self-driving Python service per team that generates
   traffic in a loop, so signals flow continuously with zero interaction.
+- **Correlated signals**: traces, logs, and metrics are linked by trace context, so you can jump
+  between them in one click (see below).
+
+## Correlated telemetry (the OpenTelemetry payoff)
+
+Because the SDK propagates trace context into every signal, the three are cross-linked in Grafana.
+All wiring is provisioned by `tools/grafana-bootstrap`; the links are per-org so they stay within a
+tenant's data.
+
+| From | To | How | Try it |
+|---|---|---|---|
+| **Logs → Trace** | Tempo | The SDK stamps `trace_id` on log records; Loki exposes it as a label and a datasource *derived field* turns it into a link | In Explore/dashboard logs, expand a line and click **View trace** |
+| **Trace → Logs** | Loki | Tempo `tracesToLogsV2` maps the span's `service.name` to the `service_name` log label | Open a trace, click **Logs for this span** |
+| **Metrics → Trace** | Tempo | Metrics carry **exemplars** (a sample tagged with its `trace_id`); Mimir stores them and the datasource links them | On a latency panel, hover an exemplar dot and click the trace link |
+
+The **Overview dashboard** in each org shows RED metrics (request rate, 5xx rate, p95 latency, with
+exemplar dots) and a logs panel with the clickable TraceID.
 
 ## Architecture
 
@@ -161,6 +178,5 @@ make reset   # nuke + up (true from-scratch rebuild)
   by tenant (`tenant-a/`, `tenant-b/`). **Mimir ships metrics blocks only every ~2h** by design, so
   the `mimir` bucket holds just a cluster-seed file until then. Data is still queryable immediately
   in Grafana the whole time (it is served from the ingester's memory/WAL before it reaches S3).
-- Grafana ships with datasources per org but **no prebuilt dashboards** here. Use **Explore** to
-  query Mimir/Loki/Tempo. Provisioning starter dashboards per org is a straightforward extension of
-  `tools/grafana-bootstrap`.
+- Each org gets an **Overview dashboard** (request rate, 5xx rate, p95 latency, and a logs panel)
+  provisioned by `tools/grafana-bootstrap`. **Explore** is still there for ad-hoc queries.

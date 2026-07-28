@@ -61,3 +61,6 @@ limits:
   out_of_order_time_window: 1h
   max_global_series_per_user: 0
   compactor_blocks_retention_period: 24h
+  # Store exemplars so metric samples can link to the trace that produced them
+  # (the metrics -> trace correlation in Grafana).
+  max_global_exemplars_per_user: 100000

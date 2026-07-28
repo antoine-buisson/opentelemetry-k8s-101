@@ -96,26 +96,82 @@ def ensure_admin_in_org(org_id):
 
 
 # ---- Datasources ------------------------------------------------------------
-def ensure_datasource(name, ds_type, url, org_id_header_value, is_default=False):
+def ensure_datasource(uid, name, ds_type, url, org_header_value, extra_json=None,
+                      is_default=False):
+    """Create a datasource with a fixed uid so datasources can cross-reference each
+    other for correlation. Delete-then-create keeps re-runs deterministic."""
     payload = {
+        "uid": uid,
         "name": name,
         "type": ds_type,
         "access": "proxy",
         "url": url,
         "isDefault": is_default,
-        "jsonData": {"httpHeaderName1": "X-Scope-OrgID"},
-        "secureJsonData": {"httpHeaderValue1": org_id_header_value},
+        # httpHeaderName1/Value1 injects the tenant's X-Scope-OrgID on every query.
+        "jsonData": {"httpHeaderName1": "X-Scope-OrgID", **(extra_json or {})},
+        "secureJsonData": {"httpHeaderValue1": org_header_value},
     }
-    existing = api("GET", f"/api/datasources/name/{name}")
-    if existing.ok:
-        uid = existing.json()["uid"]
-        r = api("PUT", f"/api/datasources/uid/{uid}", json=payload)
-        r.raise_for_status()
-        log(f"    updated datasource {name}")
+    if api("GET", f"/api/datasources/name/{name}").ok:
+        api("DELETE", f"/api/datasources/name/{name}")
+    r = api("POST", "/api/datasources", json=payload)
+    r.raise_for_status()
+    log(f"    datasource {name} (uid={uid})")
+
+
+# ---- Dashboard --------------------------------------------------------------
+def build_dashboard(uid, title, mimir_uid, loki_uid):
+    """A small RED-metrics + logs overview. Metric panels emit exemplars (dots that
+    link to a trace); the logs panel exposes a TraceID link (Loki derived field)."""
+    prom = {"type": "prometheus", "uid": mimir_uid}
+    loki = {"type": "loki", "uid": loki_uid}
+
+    def ts(pid, ptitle, expr, x, unit):
+        return {
+            "id": pid, "type": "timeseries", "title": ptitle, "datasource": prom,
+            "gridPos": {"x": x, "y": 0, "w": 8, "h": 9},
+            "fieldConfig": {"defaults": {"unit": unit}, "overrides": []},
+            "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+            "targets": [{
+                "refId": "A", "datasource": prom, "expr": expr,
+                "legendFormat": "{{job}}", "exemplar": True,
+            }],
+        }
+
+    panels = [
+        ts(1, "Request rate (req/s) by service",
+           "sum by (job) (rate(http_server_duration_count[$__rate_interval]))", 0, "reqps"),
+        ts(2, "5xx error rate by service",
+           'sum by (job) (rate(http_server_duration_count{http_status_code=~"5.."}[$__rate_interval]))',
+           8, "reqps"),
+        ts(3, "p95 latency (ms) by service",
+           "histogram_quantile(0.95, sum by (le, job) (rate(http_server_duration_bucket[$__rate_interval])))",
+           16, "ms"),
+        {
+            "id": 4, "type": "logs",
+            "title": "Logs (open a line, click TraceID to jump to the trace)",
+            "datasource": loki,
+            "gridPos": {"x": 0, "y": 9, "w": 24, "h": 11},
+            "options": {"showTime": True, "wrapLogMessage": True,
+                        "enableLogDetails": True, "sortOrder": "Descending"},
+            "targets": [{"refId": "A", "datasource": loki,
+                         "expr": '{service_name=~".+"}', "queryType": "range"}],
+        },
+    ]
+    return {
+        "uid": uid, "title": title, "tags": ["otel-101"], "schemaVersion": 39,
+        "time": {"from": "now-15m", "to": "now"}, "refresh": "10s", "panels": panels,
+    }
+
+
+def ensure_dashboard(org_id, uid, title, mimir_uid, loki_uid):
+    api("POST", f"/api/user/using/{org_id}")  # dashboards are created in the current org
+    dash = build_dashboard(uid, title, mimir_uid, loki_uid)
+    r = api("POST", "/api/dashboards/db",
+            json={"dashboard": dash, "folderUid": "", "overwrite": True})
+    if r.ok:
+        log(f"    dashboard '{title}'")
     else:
-        r = api("POST", "/api/datasources", json=payload)
-        r.raise_for_status()
-        log(f"    created datasource {name}")
+        log(f"    dashboard '{title}' FAILED: {r.status_code} {r.text[:200]}")
 
 
 # ---- Teams & folders --------------------------------------------------------
@@ -205,9 +261,50 @@ def main():
         ensure_admin_in_org(oid)
         log(f"  org '{org_name}' -> X-Scope-OrgID '{org_val}'")
 
-        ensure_datasource("Mimir", "prometheus", MIMIR_URL, org_val, is_default=True)
-        ensure_datasource("Loki", "loki", LOKI_URL, org_val)
-        ensure_datasource("Tempo", "tempo", TEMPO_URL, org_val)
+        # Per-org unique uids so the three datasources can cross-reference each other.
+        mimir_uid, loki_uid, tempo_uid = (f"mimir-{org_val}", f"loki-{org_val}",
+                                          f"tempo-{org_val}")
+
+        # Mimir: exemplars link a metric sample to the trace that produced it.
+        ensure_datasource(
+            mimir_uid, "Mimir", "prometheus", MIMIR_URL, org_val, is_default=True,
+            extra_json={
+                "httpMethod": "POST",
+                "exemplarTraceIdDestinations": [
+                    {"name": "trace_id", "datasourceUid": tempo_uid}],
+            })
+        # Loki: derived field turns the trace_id label into a link to Tempo.
+        ensure_datasource(
+            loki_uid, "Loki", "loki", LOKI_URL, org_val,
+            extra_json={
+                "derivedFields": [{
+                    "name": "TraceID", "matcherType": "label",
+                    "matcherRegex": "trace_id", "datasourceUid": tempo_uid,
+                    "url": "${__value.raw}", "urlDisplayLabel": "View trace",
+                }],
+            })
+        # Tempo: trace -> logs (by service) and trace -> metrics + service map.
+        ensure_datasource(
+            tempo_uid, "Tempo", "tempo", TEMPO_URL, org_val,
+            extra_json={
+                "tracesToLogsV2": {
+                    "datasourceUid": loki_uid,
+                    "spanStartTimeShift": "-5m", "spanEndTimeShift": "5m",
+                    "filterByTraceID": False, "filterBySpanID": False,
+                    "tags": [{"key": "service.name", "value": "service_name"}],
+                },
+                "tracesToMetrics": {
+                    "datasourceUid": mimir_uid,
+                    "spanStartTimeShift": "-5m", "spanEndTimeShift": "5m",
+                    "queries": [{"name": "Request rate by service",
+                                 "query": "sum by (job) (rate(http_server_duration_count[5m]))"}],
+                },
+                "serviceMap": {"datasourceUid": mimir_uid},
+                "nodeGraph": {"enabled": True},
+            })
+
+        ensure_dashboard(oid, f"overview-{org_val}",
+                         f"{org_name} - Overview", mimir_uid, loki_uid)
 
         for team in tenant["teams"]:
             tname = team["displayName"]

@@ -28,6 +28,8 @@ spec:
     - { name: OTEL_METRICS_EXPORTER, value: otlp }
     - { name: OTEL_LOGS_EXPORTER, value: otlp }
     - { name: OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED, value: "true" }
+    # Record exemplars (metric sample -> trace id) so metrics can link to traces.
+    - { name: OTEL_METRICS_EXEMPLAR_FILTER, value: trace_based }
 ---
 # --- tenant-a / team-2 (Onboarding) ---
 apiVersion: opentelemetry.io/v1alpha1
@@ -50,6 +52,8 @@ spec:
     - { name: OTEL_METRICS_EXPORTER, value: otlp }
     - { name: OTEL_LOGS_EXPORTER, value: otlp }
     - { name: OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED, value: "true" }
+    # Record exemplars (metric sample -> trace id) so metrics can link to traces.
+    - { name: OTEL_METRICS_EXEMPLAR_FILTER, value: trace_based }
 ---
 # --- tenant-b / team-1 (Trading) ---
 apiVersion: opentelemetry.io/v1alpha1
@@ -72,6 +76,8 @@ spec:
     - { name: OTEL_METRICS_EXPORTER, value: otlp }
     - { name: OTEL_LOGS_EXPORTER, value: otlp }
     - { name: OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED, value: "true" }
+    # Record exemplars (metric sample -> trace id) so metrics can link to traces.
+    - { name: OTEL_METRICS_EXEMPLAR_FILTER, value: trace_based }
 ---
 # --- tenant-b / team-2 (Reporting) ---
 apiVersion: opentelemetry.io/v1alpha1
@@ -94,3 +100,5 @@ spec:
     - { name: OTEL_METRICS_EXPORTER, value: otlp }
     - { name: OTEL_LOGS_EXPORTER, value: otlp }
     - { name: OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED, value: "true" }
+    # Record exemplars (metric sample -> trace id) so metrics can link to traces.
+    - { name: OTEL_METRICS_EXEMPLAR_FILTER, value: trace_based }
