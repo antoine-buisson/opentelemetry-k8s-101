@@ -7,6 +7,14 @@ tempo:
   # Disable phone-home analytics for an offline demo.
   reportingEnabled: false
 
+  # DEMO tuning: cut and flush trace blocks to RustFS quickly (defaults are 30m+), so you
+  # can watch objects land in the tempo bucket within a minute or two. Not production values.
+  ingester:
+    trace_idle_period: 10s
+    max_block_duration: 1m
+    complete_block_timeout: 1m
+    flush_check_period: 10s
+
   storage:
     trace:
       backend: s3

@@ -46,6 +46,14 @@ loki:
   pattern_ingester:
     enabled: false
 
+  # DEMO tuning: flush chunks to RustFS quickly (defaults keep chunks in memory for ~2h),
+  # so you can watch objects land in the loki bucket within a minute or two. Not production.
+  ingester:
+    chunk_idle_period: 1m
+    max_chunk_age: 1m
+    wal:
+      flush_on_shutdown: true
+
 # Run exactly one Loki pod.
 singleBinary:
   replicas: 1

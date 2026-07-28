@@ -155,3 +155,12 @@ make reset   # nuke + up (true from-scratch rebuild)
 - Logs and metrics flow via the app's OTLP export (auto-instrumentation), which keeps per-tenant
   routing clean. Cluster/node infra metrics via a DaemonSet collector are a natural next step but
   are intentionally out of scope for the 101.
+- **Where's my data in RustFS?** Backends buffer, then flush to object storage on a schedule.
+  Tempo and Loki are tuned here to flush within ~1-2 minutes (see the `ingester` blocks in their
+  values), so trace blocks and log chunks appear in the `tempo`/`loki` buckets quickly, partitioned
+  by tenant (`tenant-a/`, `tenant-b/`). **Mimir ships metrics blocks only every ~2h** by design, so
+  the `mimir` bucket holds just a cluster-seed file until then. Data is still queryable immediately
+  in Grafana the whole time (it is served from the ingester's memory/WAL before it reaches S3).
+- Grafana ships with datasources per org but **no prebuilt dashboards** here. Use **Explore** to
+  query Mimir/Loki/Tempo. Provisioning starter dashboards per org is a straightforward extension of
+  `tools/grafana-bootstrap`.
