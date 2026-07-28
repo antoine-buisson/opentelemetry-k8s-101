@@ -47,6 +47,11 @@ service:
   console:
     port: 9001
 
+# The chart creates an Ingress by default; we manage ingress ourselves (deploy/80-ingress),
+# and creating it here races the ingress-nginx admission webhook during `make storage`.
+ingress:
+  enabled: false
+
 resources:
   requests:
     cpu: 100m

@@ -181,6 +181,9 @@ workloads: build ## Deploy the per-team synthetic workloads
 
 ingress: ## Create nip.io Ingress for Grafana + Keycloak (no port-forward needed)
 	@echo ">> Ingress (nip.io)"
+	@echo "   waiting for the ingress-nginx admission webhook to be ready..."
+	@$(KUBECTL) -n ingress-nginx wait --for=condition=ready pod \
+		-l app.kubernetes.io/component=controller --timeout=180s >/dev/null 2>&1 || true
 	@IP=$$(minikube -p $(MINIKUBE_PROFILE) ip); \
 	 sed -e "s/__GRAFANA_HOST__/grafana.$$IP.nip.io/g" \
 	     -e "s/__KEYCLOAK_HOST__/keycloak.$$IP.nip.io/g" \
