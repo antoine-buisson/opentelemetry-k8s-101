@@ -1,0 +1,88 @@
+# =============================================================================
+# SINGLE SOURCE OF TRUTH for the multi-tenant topology.
+#
+# Everything downstream reads this file:
+#   - deploy/40-collectors  -> one gateway collector + Instrumentation per tenant
+#   - deploy/60-workloads    -> one synthetic app per team
+#   - tools/grafana-bootstrap -> Grafana orgs / teams / users / folders / datasources
+#
+# Model (see README):
+#   tenant  -> HARD isolation: a Mimir/Loki/Tempo tenant (X-Scope-OrgID) + a Grafana Org
+#   team    -> SOFT isolation: its own namespace + a Grafana Team + Folder (shares tenant data)
+#   role    -> Grafana org role, plus special cross-cutting users (audit, platform-admin)
+# =============================================================================
+
+# Object-storage tenant header used across Mimir/Loki/Tempo.
+orgIdHeader: X-Scope-OrgID
+
+tenants:
+  - name: tenant-a
+    displayName: "Tenant A (Retail Bank)"
+    # X-Scope-OrgID value stamped on every signal leaving this tenant's gateway.
+    orgId: tenant-a
+    grafanaOrg: "Tenant A"
+    teams:
+      - name: team-1
+        namespace: tenant-a-team-1
+        displayName: "Payments"
+        service: payments
+      - name: team-2
+        namespace: tenant-a-team-2
+        displayName: "Onboarding"
+        service: onboarding
+
+  - name: tenant-b
+    displayName: "Tenant B (Asset Mgmt)"
+    orgId: tenant-b
+    grafanaOrg: "Tenant B"
+    teams:
+      - name: team-1
+        namespace: tenant-b-team-1
+        displayName: "Trading"
+        service: trading
+      - name: team-2
+        namespace: tenant-b-team-2
+        displayName: "Reporting"
+        service: reporting
+
+# Users provisioned by tools/grafana-bootstrap.
+# role: Grafana org role (Admin | Editor | Viewer).
+# orgs: which Grafana org(s) the user belongs to and with which role.
+#   Use "*" to mean "every tenant org" (that is how the cross-tenant audit role works).
+# serverAdmin: true grants Grafana *server* admin (can see/switch every org).
+users:
+  - login: platform-admin
+    name: "Platform Admin"
+    password: "admin-please-change"
+    serverAdmin: true
+    orgs:
+      - { org: "*", role: Admin }
+
+  - login: auditor
+    name: "Compliance Auditor"
+    password: "audit-please-change"
+    serverAdmin: false
+    # Read-only across BOTH tenant orgs -> the cross-tenant audit role.
+    orgs:
+      - { org: "*", role: Viewer }
+
+  - login: alice
+    name: "Alice (Tenant A / Payments lead)"
+    password: "alice-please-change"
+    serverAdmin: false
+    orgs:
+      - { org: "Tenant A", role: Editor, team: "Payments" }
+
+  - login: bob
+    name: "Bob (Tenant A / Onboarding)"
+    password: "bob-please-change"
+    serverAdmin: false
+    orgs:
+      - { org: "Tenant A", role: Viewer, team: "Onboarding" }
+
+  - login: carol
+    name: "Carol (Tenant B / Trading lead)"
+    password: "carol-please-change"
+    serverAdmin: false
+    orgs:
+      - { org: "Tenant B", role: Editor, team: "Trading" }

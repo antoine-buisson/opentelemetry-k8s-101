@@ -1,0 +1,73 @@
+# Mimir single-binary Deployment. The ConfigMap `mimir-config` is created by the Makefile
+# from deploy/20-backends/mimir/mimir.yaml (so that file stays the single source of truth).
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mimir-data
+  namespace: observability
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mimir
+  namespace: observability
+  labels: { app: mimir }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }   # single RWO PVC must not be double-mounted
+  selector:
+    matchLabels: { app: mimir }
+  template:
+    metadata:
+      labels: { app: mimir }
+      annotations:
+        # Roll the pod when the config changes (checksum wired by the Makefile apply).
+        checksum/config: "from-configmap"
+    spec:
+      securityContext:
+        fsGroup: 10001
+        runAsUser: 10001
+        runAsNonRoot: true
+      containers:
+        - name: mimir
+          image: grafana/mimir:3.1.2
+          args:
+            - -target=all
+            - -config.file=/etc/mimir/mimir.yaml
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: grpc, containerPort: 9095 }
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/mimir }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: config
+          configMap: { name: mimir-config }
+        - name: data
+          persistentVolumeClaim: { claimName: mimir-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mimir
+  namespace: observability
+  labels: { app: mimir }
+spec:
+  selector: { app: mimir }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+    - { name: grpc, port: 9095, targetPort: grpc }

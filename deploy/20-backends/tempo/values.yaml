@@ -1,0 +1,40 @@
+# Grafana Tempo — chart grafana-community/tempo 2.2.3 (appVersion 2.10.7)
+# Single-binary mode. Multi-tenancy ON, object storage on RustFS.
+
+tempo:
+  # Require X-Scope-OrgID on reads AND writes -> hard per-tenant isolation.
+  multitenancyEnabled: true
+  # Disable phone-home analytics for an offline demo.
+  reportingEnabled: false
+
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: tempo
+        endpoint: rustfs-svc.observability.svc.cluster.local:9000
+        access_key: otel-demo
+        secret_key: otel-demo-secret-key-change-me
+        insecure: true          # plain HTTP
+        forcepathstyle: true    # required for S3-compatible stores like RustFS
+
+  # OTLP receivers (gRPC 4317 / HTTP 4318) are on by default; keep only OTLP.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+persistence:
+  enabled: true
+  storageClassName: standard
+  size: 5Gi
+
+# Metrics-generator writes span metrics back to Mimir; off by default here to keep it simple.
+# (Enable later by pointing tempo.metricsGenerator at the Mimir remote-write endpoint.)

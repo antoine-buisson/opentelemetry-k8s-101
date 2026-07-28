@@ -1,0 +1,73 @@
+# Grafana Loki — chart grafana-community/loki 18.7.0 (appVersion 3.7.4)
+# Monolithic (single-binary) mode, trimmed to the minimum for minikube.
+
+deploymentMode: Monolithic
+
+loki:
+  # Require X-Scope-OrgID -> hard per-tenant isolation (matches Mimir/Tempo).
+  auth_enabled: true
+
+  commonConfig:
+    replication_factor: 1
+
+  # Object storage on RustFS (S3-compatible), bucket "loki".
+  storage:
+    type: s3
+    bucketNames:
+      chunks: loki
+      ruler: loki
+      admin: loki
+    s3:
+      endpoint: http://rustfs-svc.observability.svc.cluster.local:9000
+      region: us-east-1
+      accessKeyId: otel-demo
+      secretAccessKey: otel-demo-secret-key-change-me
+      s3ForcePathStyle: true
+      insecure: true
+
+  # TSDB schema (required). Single active period is fine for a demo.
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+  # Accept OTLP logs and keep the demo permissive.
+  limits_config:
+    allow_structured_metadata: true
+    volume_enabled: true
+    retention_period: 24h
+
+  # Silence the "structured metadata requires tsdb v13" style pattern-ingester noise.
+  pattern_ingester:
+    enabled: false
+
+# Run exactly one Loki pod.
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    storageClass: standard
+    size: 5Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+# Strip everything not needed for a single-node teaching setup.
+gateway: { enabled: false }
+lokiCanary: { enabled: false }
+test: { enabled: false }
+chunksCache: { enabled: false }
+resultsCache: { enabled: false }
+monitoring:
+  selfMonitoring: { enabled: false }
+  serviceMonitor: { enabled: false }
+
+# Zero out the microservices/SSD targets (Monolithic uses singleBinary only).
+backend: { replicas: 0 }
+read: { replicas: 0 }
+write: { replicas: 0 }

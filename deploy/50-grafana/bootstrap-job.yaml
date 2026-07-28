@@ -1,0 +1,50 @@
+# Runs tools/grafana-bootstrap/bootstrap.py against Grafana to create orgs / datasources /
+# teams / folders / users from config/tenants.yaml.
+#
+# The two ConfigMaps below are created by the Makefile from the source files:
+#   grafana-bootstrap-script  <- tools/grafana-bootstrap/bootstrap.py
+#   tenants-config            <- config/tenants.yaml
+# so those files stay the single source of truth.
+#
+# NOTE: pip-installs requests + pyyaml at start -> the node needs internet egress.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grafana-bootstrap
+  namespace: observability
+  labels:
+    otel-k8s-101/layer: grafana
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels: { app: grafana-bootstrap }
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: python:3.12-slim
+          env:
+            - name: GRAFANA_URL
+              value: http://grafana.observability.svc.cluster.local:80
+            - name: GRAFANA_USER
+              valueFrom: { secretKeyRef: { name: grafana, key: admin-user } }
+            - name: GRAFANA_PASSWORD
+              valueFrom: { secretKeyRef: { name: grafana, key: admin-password } }
+            - name: TENANTS_FILE
+              value: /config/tenants.yaml
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              pip install --quiet --no-cache-dir requests pyyaml
+              exec python /app/bootstrap.py
+          volumeMounts:
+            - { name: script, mountPath: /app }
+            - { name: tenants, mountPath: /config }
+      volumes:
+        - name: script
+          configMap: { name: grafana-bootstrap-script }
+        - name: tenants
+          configMap: { name: tenants-config }

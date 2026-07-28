@@ -1,0 +1,54 @@
+# Grafana Mimir configuration, run as a SINGLE BINARY (-target=all).
+# The official mimir-distributed Helm chart is microservices-only and its smallest
+# preset (small.yaml) requests ~10+ CPU / 30+ GiB — infeasible on minikube. For a 101
+# a single binary is lighter and far more readable. See README "Why not the Mimir chart".
+
+# Require X-Scope-OrgID on reads and writes -> hard per-tenant isolation.
+multitenancy_enabled: true
+
+server:
+  http_listen_port: 8080
+  grpc_listen_port: 9095
+  log_level: info
+
+# Single-node rings.
+ingester:
+  ring:
+    replication_factor: 1
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+
+# All object storage goes to RustFS (S3-compatible), one bucket "mimir" with a
+# distinct prefix per data type.
+common:
+  storage:
+    backend: s3
+    s3:
+      endpoint: rustfs-svc.observability.svc.cluster.local:9000
+      region: us-east-1
+      access_key_id: otel-demo
+      secret_access_key: otel-demo-secret-key-change-me
+      insecure: true          # RustFS is plain HTTP in-cluster
+      bucket_name: mimir
+
+blocks_storage:
+  storage_prefix: blocks
+  tsdb:
+    dir: /data/tsdb
+  bucket_store:
+    sync_dir: /data/tsdb-sync
+
+ruler_storage:
+  storage_prefix: ruler
+
+compactor:
+  data_dir: /data/compactor
+
+# Generous limits so the demo ingests without tuning.
+limits:
+  ingestion_rate: 100000
+  ingestion_burst_size: 200000
+  out_of_order_time_window: 1h
+  max_global_series_per_user: 0
+  compactor_blocks_retention_period: 24h

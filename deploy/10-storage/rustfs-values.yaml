@@ -1,0 +1,55 @@
+# RustFS (S3-compatible object storage) — chart rustfs/rustfs 0.11.0 (appVersion 1.0.0-beta.11)
+# Deployed in STANDALONE mode: a single Deployment + PVC. Fine for local/dev, NOT HA.
+#
+# NOTE (beta software): RustFS is pre-1.0 and not officially certified against the Grafana
+# LGTM stack. `make smoke` validates the S3 pairing before the rest of the stack is built.
+
+# Pin the resource name to "rustfs" so in-cluster DNS is predictable. NOTE: the chart
+# appends "-svc" to the Service, so backends reach it at:
+#   rustfs-svc.observability.svc.cluster.local:9000
+fullnameOverride: rustfs
+
+mode:
+  standalone:
+    enabled: true
+  distributed:
+    enabled: false
+
+# Root credentials == the S3 access/secret key the backends use.
+# Demo values — change for anything beyond a local sandbox.
+secret:
+  rustfs:
+    access_key: "otel-demo"
+    secret_key: "otel-demo-secret-key-change-me"
+
+config:
+  rustfs:
+    console_enable: "true"
+    console_address: ":9001"
+    region: "us-east-1"
+
+# minikube's default StorageClass is "standard" (not "local-path").
+storageclass:
+  name: standard
+  dataStorageSize: 5Gi
+  logStorageSize: 512Mi
+
+# RustFS runs as UID/GID 10001; the chart already sets fsGroup so the PVC is writable.
+podSecurityContext:
+  fsGroup: 10001
+  runAsUser: 10001
+  runAsGroup: 10001
+
+service:
+  type: ClusterIP
+  endpoint:
+    port: 9000
+  console:
+    port: 9001
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi

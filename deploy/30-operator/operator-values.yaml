@@ -1,0 +1,19 @@
+# OpenTelemetry Operator — chart open-telemetry/opentelemetry-operator 0.120.0
+# (operator appVersion 0.156.0). Installs the OpenTelemetryCollector + Instrumentation CRDs
+# and a mutating webhook that injects auto-instrumentation into annotated pods.
+
+# Use the chart's self-signed webhook certificate instead of cert-manager -> one fewer
+# dependency on minikube.
+admissionWebhooks:
+  certManager:
+    enabled: false
+  autoGenerateCert:
+    enabled: true
+
+manager:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  # The collector image the operator uses when a Collector CR omits its own image.
+  collectorImage:
+    repository: otel/opentelemetry-collector-contrib

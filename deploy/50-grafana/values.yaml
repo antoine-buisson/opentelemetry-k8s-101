@@ -1,0 +1,35 @@
+# Grafana OSS — chart grafana-community/grafana 12.10.0 (appVersion 13.1.1)
+# Frontend for all three backends. Orgs / teams / users / datasources are created by the
+# bootstrap Job (tools/grafana-bootstrap), NOT here — Grafana OSS can't provision those from
+# files, and datasources must land in the per-tenant orgs the Job creates.
+
+# Built-in server admin. The bootstrap Job uses these credentials to call the Grafana API.
+adminUser: admin
+adminPassword: admin
+
+persistence:
+  enabled: true
+  storageClassName: standard
+  size: 2Gi
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { memory: 512Mi }
+
+service:
+  type: ClusterIP
+
+# No datasource/dashboard provisioning here (the Job owns that).
+datasources: {}
+dashboardProviders: {}
+
+grafana.ini:
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+  users:
+    # Let users belonging to multiple orgs switch between them in the UI.
+    allow_org_create: false
+  # Keep the default login form (username/password) for the demo users.
+  auth.anonymous:
+    enabled: false

@@ -1,0 +1,43 @@
+# Namespaces for the whole stack.
+#   observability  -> storage (RustFS), backends (Mimir/Loki/Tempo), Grafana, per-tenant gateways
+#   tenant-*-team-* -> one namespace per team; workloads live here and are auto-instrumented
+# The OTEL operator installs into its own namespace via Helm (opentelemetry-operator-system).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    otel-k8s-101/layer: platform
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-a-team-1
+  labels:
+    otel-k8s-101/tenant: tenant-a
+    otel-k8s-101/team: team-1
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-a-team-2
+  labels:
+    otel-k8s-101/tenant: tenant-a
+    otel-k8s-101/team: team-2
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-b-team-1
+  labels:
+    otel-k8s-101/tenant: tenant-b
+    otel-k8s-101/team: team-1
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-b-team-2
+  labels:
+    otel-k8s-101/tenant: tenant-b
+    otel-k8s-101/team: team-2

@@ -1,0 +1,43 @@
+# Pre-creates the buckets the LGTM backends expect. RustFS does NOT auto-create buckets.
+# Uses the MinIO client (mc), which speaks the S3 API against RustFS.
+# Idempotent: `mc mb -p` ignores already-existing buckets.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rustfs-create-buckets
+  namespace: observability
+  labels:
+    otel-k8s-101/layer: storage
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: rustfs-create-buckets
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc:latest
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: s3-credentials, key: AWS_ACCESS_KEY_ID } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: s3-credentials, key: AWS_SECRET_ACCESS_KEY } }
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for RustFS to answer on :9000 ..."
+              until mc alias set rustfs http://rustfs-svc.observability.svc.cluster.local:9000 \
+                    "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" >/dev/null 2>&1; do
+                echo "  ...not ready yet"; sleep 3
+              done
+              echo "RustFS reachable. Creating buckets."
+              for b in mimir loki tempo; do
+                mc mb -p "rustfs/$b" || true
+              done
+              echo "Buckets present:"
+              mc ls rustfs

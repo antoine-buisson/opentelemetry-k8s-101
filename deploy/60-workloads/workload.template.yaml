@@ -1,0 +1,47 @@
+# Per-team synthetic workload. The Makefile renders this once per team (substituting the
+# __PLACEHOLDERS__) from the list that mirrors config/tenants.yaml.
+#
+# The annotation is the ONLY thing wiring in OpenTelemetry: it tells the operator to inject
+# the Python SDK + auto-instrumentation, using the Instrumentation CR named "python" that
+# lives in this same namespace (deploy/40-collectors/instrumentation.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: __SERVICE__
+  namespace: __NAMESPACE__
+  labels:
+    app: __SERVICE__
+    otel-k8s-101/tenant: __TENANT__
+    otel-k8s-101/team: __TEAM__
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: __SERVICE__
+  template:
+    metadata:
+      labels:
+        app: __SERVICE__
+        otel-k8s-101/tenant: __TENANT__
+        otel-k8s-101/team: __TEAM__
+      annotations:
+        instrumentation.opentelemetry.io/inject-python: "true"
+    spec:
+      containers:
+        - name: app
+          image: otel-synthetic:latest
+          imagePullPolicy: IfNotPresent   # image is built into minikube's docker; never pull
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: __SERVICE__
+            - name: APP_PORT
+              value: "8080"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 192Mi }
