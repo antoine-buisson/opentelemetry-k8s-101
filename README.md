@@ -39,24 +39,26 @@ exemplar dots) and a logs panel with the clickable TraceID.
 ## SSO with Keycloak
 
 Grafana login is backed by **Keycloak** (OIDC). A user's **Keycloak group membership** decides which
-tenant org and role they get in Grafana, via Grafana OSS `org_mapping`. The local `admin/admin`
-login stays enabled as a fallback.
+team org(s) they land in, via Grafana OSS `org_mapping` (a group can map to several orgs). The local
+`admin/admin` login stays enabled as a fallback.
 
 The realm is **generated from `config/tenants.yaml`** by `tools/keycloak-realm/generate_realm.py`
-(same source of truth as everything else), so users and their groups never drift. Group → access
-mapping:
+(same source of truth as everything else), so users and their groups never drift. Group → org
+mapping (everyone is Editor; the org is what scopes data):
 
-| Keycloak group | Grafana result |
+| Keycloak group | Grafana org(s) |
 |---|---|
-| `tenant-a-editors` / `-viewers` / `-admins` | Org **Tenant A** as Editor / Viewer / Admin |
-| `tenant-b-editors` / `-viewers` / `-admins` | Org **Tenant B** as ... |
-| `auditors` | **Viewer in both** tenant orgs (cross-tenant read) |
+| `payments` / `onboarding` / `trading` / `reporting` | the matching team org (that team only) |
+| `tenant-a` | **Tenant A - Payments** + **Tenant A - Onboarding** |
+| `tenant-b` | **Tenant B - Trading** + **Tenant B - Reporting** |
+| `auditors` | all four team orgs |
 | `platform-admins` | **Grafana server admin** (via `role_attribute_path`) |
 
 Log in: run `make keycloak-info` for the URLs, open Grafana at `http://grafana.<minikube-ip>.nip.io`,
 click **Sign in with Keycloak**, and use a demo user (passwords in `config/tenants.yaml`). For
-example `alice` lands in Tenant A as Editor; `auditor` sees both tenants read-only; `platform-admin`
-is server admin. (`make grafana-forward` still works for the local `admin/admin` fallback.)
+example `alice` sees only the Payments team; `dave` (tenant-a) can switch between both Tenant A team
+orgs; `auditor` can switch across all four; `platform-admin` is server admin. (`make grafana-forward`
+still works for the local `admin/admin` fallback.)
 
 How the URLs line up (the usual Keycloak-in-k8s snags):
 - **Ingress via nip.io.** `make up` enables minikube's ingress addon and creates Ingress for Grafana
@@ -74,43 +76,51 @@ How the URLs line up (the usual Keycloak-in-k8s snags):
 ## Architecture
 
 ```
-  tenant-a-team-1        tenant-a-team-2      tenant-b-team-1     tenant-b-team-2
-  (payments)             (onboarding)         (trading)           (reporting)
+  payments             onboarding           trading              reporting
+  (ns tenant-a-team-1) (ns tenant-a-team-2) (ns tenant-b-team-1) (ns tenant-b-team-2)
       |  Python app auto-instrumented by the OTEL Operator (pod annotation)
       |  OTLP                    |                   |                  |
       v                          v                   v                  v
-  [ gateway-tenant-a collector ]           [ gateway-tenant-b collector ]
-      |  stamps X-Scope-OrgID: tenant-a         |  stamps X-Scope-OrgID: tenant-b
-      |                                         |
-      +----> Tempo (traces) ----+              +----> Tempo
-      +----> Mimir (metrics) ---+--- S3 --->   +----> Mimir  --- S3 --->  [ RustFS ]
-      +----> Loki  (logs) ------+              +----> Loki                (buckets:
-                                                                           mimir/loki/tempo)
-  [ Grafana OSS ]
-    Org "Tenant A"  -> datasources send X-Scope-OrgID: tenant-a  (sees only tenant-a data)
-    Org "Tenant B"  -> datasources send X-Scope-OrgID: tenant-b  (sees only tenant-b data)
+  [ gateway per TEAM ] — each stamps its own X-Scope-OrgID (= its namespace)
+      | tenant-a-team-1   | tenant-a-team-2   | tenant-b-team-1   | tenant-b-team-2
+      +----> Tempo (traces) ---+
+      +----> Mimir (metrics) --+--- S3 --->  [ RustFS ]  (buckets: mimir/loki/tempo)
+      +----> Loki  (logs) -----+
+  [ Grafana OSS ]  one Org per team, datasource sends only that team's X-Scope-OrgID:
+    Org "Tenant A - Payments"   -> tenant-a-team-1   (sees only payments)
+    Org "Tenant A - Onboarding" -> tenant-a-team-2   (sees only onboarding)
+    Org "Tenant B - Trading"    -> tenant-b-team-1   ...
+    Org "Tenant B - Reporting"  -> tenant-b-team-2
 ```
 
-Every signal for a tenant carries that tenant's `X-Scope-OrgID`, so Mimir/Loki/Tempo store and
-serve each tenant's data separately. Grafana reproduces the boundary: one Organization per
-tenant, whose datasources inject the matching header.
+Every team's signals carry that team's `X-Scope-OrgID`, so Mimir/Loki/Tempo store and serve each
+team's data separately. Grafana reproduces the boundary: one Organization per team, whose
+datasources inject only that team's header. A "tenant-wide" view is simply membership in both of a
+tenant's team orgs.
 
 ## Tenancy and access model
 
+The isolation boundary is the **team**. Each team is hard-isolated at the data layer and mirrored
+by a Grafana org:
+
 | Concept | Implemented as | Isolation |
 |---|---|---|
-| **Tenant** (`tenant-a`, `tenant-b`) | Mimir/Loki/Tempo tenant via `X-Scope-OrgID` + a Grafana Organization | **Hard** (storage-level) |
-| **Team** (2 per tenant) | Its own namespace + a Grafana Team + Folder; workloads tagged with `team`/`tenant` resource attributes | **Soft** (shares tenant data, scoped by folder/label) |
-| **Roles** | Grafana org roles, plus `auditor` (Viewer in both orgs) and `platform-admin` (server admin) | Grafana-native |
+| **Team** (4: payments, onboarding, trading, reporting) | Its own Mimir/Loki/Tempo tenant (`X-Scope-OrgID = <team>`) **+** its own Grafana Org whose datasources carry only that tenant id | **Hard** (query-level: a member can only ever query their team's data) |
+| **Tenant** (Tenant A, Tenant B) | Not a backend tenant here — just "the pair of team orgs". A tenant-level user is a member of both team orgs and switches between them | Grouping |
+| **Cross-cutting** | `auditor` (member of all four team orgs), `platform-admin` (Grafana server admin) | Grafana-native |
 
-Everything is driven by one file: [`config/tenants.yaml`](config/tenants.yaml). It defines the
-tenants, teams, roles, and demo users. The collectors, workloads, and the Grafana bootstrap all
-follow it.
+Everything is driven by one file: [`config/tenants.yaml`](config/tenants.yaml) (teams + users). The
+collectors, workloads, Grafana bootstrap, and Keycloak realm all follow it.
 
-**Honest limitation.** Grafana OSS has no per-query enforcement inside an org, so the two teams
-in a tenant share the same datasource and their separation is by folder and by the `team` label,
-not by query. To make a team a *hard* boundary, give it its own `X-Scope-OrgID`. The config is
-data-driven, so that is a small, local change.
+**Why team = its own tenant + org (the important bit).** Grafana **OSS has no LBAC and no
+fine-grained RBAC** — those are Enterprise/Cloud
+([LBAC](https://grafana.com/docs/grafana/latest/administration/data-source-management/teamlbac/),
+[RBAC](https://grafana.com/docs/grafana/latest/administration/roles-and-permissions/access-control/)).
+In OSS, Teams and folder permissions only gate *saved dashboards*; they do **not** restrict Explore
+or ad-hoc queries — a user can query everything in a datasource. So the only way to enforce
+per-team query isolation in OSS is at the data layer: a separate backend tenant (`X-Scope-OrgID`)
+and a separate Grafana org per team. That is what this repo does. (Org roles Viewer/Editor/Admin
+don't scope *data*, so everyone is Editor.)
 
 ## Prerequisites
 
@@ -137,21 +147,24 @@ and query Mimir (metrics), Loki (logs), and Tempo (traces); data appears within 
 
 ## Verify the isolation
 
-The point of the demo is that tenant A cannot see tenant B's data. From inside the cluster:
+Each team is its own backend tenant, so a query scoped to one team only returns that team. From
+inside the cluster (the team's tenant id is its namespace):
 
 ```bash
-# Same query, different tenant header -> different data.
-kubectl -n observability run q --rm -i --restart=Never --image=curlimages/curl -- \
-  curl -s -H 'X-Scope-OrgID: tenant-a' \
-  'http://mimir:8080/prometheus/api/v1/query?query=up' ; echo
+# Payments team only -> only the "payments" service appears.
+kubectl -n observability run q --rm -i --restart=Never --image=curlimages/curl --command -- \
+  curl -s -G -H 'X-Scope-OrgID: tenant-a-team-1' \
+  'http://mimir:8080/prometheus/api/v1/query' --data-urlencode 'query=count by (job) (target_info)' ; echo
 
-kubectl -n observability run q --rm -i --restart=Never --image=curlimages/curl -- \
-  curl -s -H 'X-Scope-OrgID: tenant-b' \
-  'http://loki:3100/loki/api/v1/labels' ; echo
+# Onboarding team only -> different, non-overlapping result.
+kubectl -n observability run q --rm -i --restart=Never --image=curlimages/curl --command -- \
+  curl -s -G -H 'X-Scope-OrgID: tenant-a-team-2' \
+  'http://mimir:8080/prometheus/api/v1/query' --data-urlencode 'query=count by (job) (target_info)' ; echo
 ```
 
-In Grafana, log in as `auditor` (read-only in both orgs) versus `alice` (Editor in Tenant A
-only) to see role separation.
+In Grafana, log in as `alice` — she is only in the **Tenant A - Payments** org, so Explore shows
+only payments data (she can no longer see onboarding). `dave` can switch between both Tenant A team
+orgs; `auditor` across all four.
 
 ## Layers (deploy order)
 
@@ -221,10 +234,11 @@ make reset   # nuke + up (true from-scratch rebuild)
   in Grafana the whole time (it is served from the ingester's memory/WAL before it reaches S3).
 - Each org gets an **Overview dashboard** (request rate, 5xx rate, p95 latency, and a logs panel)
   provisioned by `tools/grafana-bootstrap`. **Explore** is still there for ad-hoc queries.
-- **SSO caveats.** Group → **org + role** mapping works in Grafana OSS (`org_mapping`); group →
-  **Grafana Team** sync is Enterprise-only, so team membership stays bootstrap-driven. The Keycloak
-  NodePort URL is reachable by the browser only on **Linux + docker driver** (the minikube node IP
-  is host-routable there); on macOS/Windows use a tunnel and adjust the OAuth URLs. Keycloak runs in
+- **SSO caveats.** Group → **org** mapping works in Grafana OSS (`org_mapping`, and one group can map
+  to several orgs). LBAC / fine-grained RBAC / datasource permissions and group→Grafana-Team sync are
+  all Enterprise/Cloud — which is exactly why isolation is enforced by the backend tenant + org
+  boundary, not inside Grafana. Ingress hosts (`*.<minikube-ip>.nip.io`) are browser-reachable only on
+  **Linux + docker driver**; on macOS/Windows use a tunnel and adjust the OAuth URLs. Keycloak runs in
   dev mode with an **ephemeral H2** store, so the realm JSON (regenerated from `tenants.yaml`) is the
   source of truth and is re-imported on every restart. The client secret and user passwords here are
   **demo values**.

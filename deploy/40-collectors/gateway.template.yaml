@@ -1,0 +1,47 @@
+# One OTEL Collector "gateway" PER TEAM. Each stamps its team's X-Scope-OrgID on every export,
+# which is what makes each team's data land in a separate Mimir/Loki/Tempo tenant (hard isolation).
+# Rendered by the Makefile `collectors` target once per team in config/tenants.yaml.
+#   __NAME__      gateway-<namespace>            __TENANT_ID__  the team's X-Scope-OrgID
+#   __TENANT__    tenant-a|tenant-b              __TEAM__       team-1|team-2
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: __NAME__
+  namespace: observability
+  labels:
+    otel-k8s-101/tenant: __TENANT__
+    otel-k8s-101/team: __TEAM__
+spec:
+  mode: deployment
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc: { endpoint: 0.0.0.0:4317 }
+          http: { endpoint: 0.0.0.0:4318 }
+    processors:
+      batch: {}
+      resource:
+        attributes:
+          - { key: tenant, value: __TENANT__, action: upsert }
+          - { key: team, value: __TEAM__, action: upsert }
+    exporters:
+      # otlphttp appends /v1/{traces,metrics,logs} to the endpoint below.
+      otlphttp/tempo:
+        endpoint: http://tempo.observability.svc.cluster.local:4318
+        headers: { X-Scope-OrgID: __TENANT_ID__ }
+      otlphttp/mimir:
+        endpoint: http://mimir.observability.svc.cluster.local:8080/otlp
+        headers: { X-Scope-OrgID: __TENANT_ID__ }
+      otlphttp/loki:
+        endpoint: http://loki.observability.svc.cluster.local:3100/otlp
+        headers: { X-Scope-OrgID: __TENANT_ID__ }
+    service:
+      pipelines:
+        traces:  { receivers: [otlp], processors: [resource, batch], exporters: [otlphttp/tempo] }
+        metrics: { receivers: [otlp], processors: [resource, batch], exporters: [otlphttp/mimir] }
+        logs:    { receivers: [otlp], processors: [resource, batch], exporters: [otlphttp/loki] }

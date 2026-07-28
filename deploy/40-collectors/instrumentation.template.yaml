@@ -1,0 +1,27 @@
+# One Instrumentation CR per TEAM namespace. The OTEL Operator injects the Python SDK into pods
+# annotated `instrumentation.opentelemetry.io/inject-python: "true"` and points them at their
+# team's gateway. Rendered by the Makefile `collectors` target from config/tenants.yaml.
+#   __NAMESPACE__  team namespace     __GATEWAY__  gateway-<namespace> (its collector's name)
+#   __TENANT__     tenant-a|tenant-b  __TEAM__     team-1|team-2
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: python
+  namespace: __NAMESPACE__
+spec:
+  exporter:
+    endpoint: http://__GATEWAY__-collector.observability.svc.cluster.local:4318
+  propagators: [tracecontext, baggage]
+  sampler:
+    type: parentbased_always_on
+  resource:
+    resourceAttributes:
+      tenant: __TENANT__
+      team: __TEAM__
+  env:
+    - { name: OTEL_EXPORTER_OTLP_PROTOCOL, value: http/protobuf }
+    - { name: OTEL_METRICS_EXPORTER, value: otlp }
+    - { name: OTEL_LOGS_EXPORTER, value: otlp }
+    - { name: OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED, value: "true" }
+    # Record exemplars (metric sample -> trace id) so metrics can link to traces.
+    - { name: OTEL_METRICS_EXEMPLAR_FILTER, value: trace_based }

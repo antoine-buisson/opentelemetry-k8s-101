@@ -68,12 +68,15 @@ grafana.ini:
     login_attribute_path: preferred_username
     email_attribute_path: email
     groups_attribute_path: groups
-    # Map Keycloak groups -> Grafana org + role. Orgs are pre-created by the bootstrap Job.
-    # (JSON-array form is required because org names contain a space.)
+    # Map Keycloak groups -> Grafana org (one group may map to several orgs). Each team org has
+    # a single-tenant datasource, so this is what enforces hard per-team isolation. Orgs are
+    # pre-created by the bootstrap Job. Mirror of config/tenants.yaml (teams + cross-cutting
+    # groups). Everyone is Editor (OSS roles don't scope data). JSON-array form (org names
+    # contain spaces); single line so no newlines leak into grafana.ini.
     org_attribute_path: groups
-    # Single line on purpose: Grafana wants a JSON array string, and a folded scalar would
-    # smuggle newlines into grafana.ini.
-    org_mapping: '["tenant-a-admins:Tenant A:Admin", "tenant-a-editors:Tenant A:Editor", "tenant-a-viewers:Tenant A:Viewer", "tenant-b-admins:Tenant B:Admin", "tenant-b-editors:Tenant B:Editor", "tenant-b-viewers:Tenant B:Viewer", "auditors:*:Viewer", "platform-admins:*:Admin"]'
+    # Org names are hyphenated (NO spaces): Grafana's org_mapping parser is unreliable with
+    # spaces in the org name, so team orgs are named Tenant-A-Payments etc.
+    org_mapping: '["payments:Tenant-A-Payments:Editor", "onboarding:Tenant-A-Onboarding:Editor", "trading:Tenant-B-Trading:Editor", "reporting:Tenant-B-Reporting:Editor", "tenant-a:Tenant-A-Payments:Editor", "tenant-a:Tenant-A-Onboarding:Editor", "tenant-b:Tenant-B-Trading:Editor", "tenant-b:Tenant-B-Reporting:Editor", "auditors:Tenant-A-Payments:Editor", "auditors:Tenant-A-Onboarding:Editor", "auditors:Tenant-B-Trading:Editor", "auditors:Tenant-B-Reporting:Editor"]'
     # GrafanaAdmin (server admin) can only be granted via role_attribute_path.
     allow_assign_grafana_admin: true
     role_attribute_path: contains(groups[*], 'platform-admins') && 'GrafanaAdmin' || 'None'

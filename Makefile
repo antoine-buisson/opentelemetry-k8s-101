@@ -112,10 +112,18 @@ operator: repos ## Install the OpenTelemetry Operator
 	@echo "   waiting for the operator webhook to settle..."
 	@sleep 15
 
-collectors: ## Deploy per-tenant gateway collectors + Instrumentation CRs
-	@echo ">> Gateway collectors (one per tenant) + Instrumentation CRs"
-	@$(KUBECTL) apply -f deploy/40-collectors/gateways.yaml
-	@$(KUBECTL) apply -f deploy/40-collectors/instrumentation.yaml
+collectors: ## Deploy per-team gateway collectors + Instrumentation CRs
+	@echo ">> Per-team gateway collectors + Instrumentation CRs"
+	@for t in $(TEAMS); do \
+		ns=$${t%%:*}; rest=$${t#*:}; svc=$${rest%%:*}; rest=$${rest#*:}; tenant=$${rest%%:*}; team=$${rest#*:}; \
+		echo "   $$tenant/$$team -> X-Scope-OrgID=$$ns (gateway-$$ns)"; \
+		sed -e "s/__NAME__/gateway-$$ns/g" -e "s/__TENANT_ID__/$$ns/g" \
+		    -e "s/__TENANT__/$$tenant/g" -e "s/__TEAM__/$$team/g" \
+		    deploy/40-collectors/gateway.template.yaml | $(KUBECTL) apply -f - ; \
+		sed -e "s/__NAMESPACE__/$$ns/g" -e "s/__GATEWAY__/gateway-$$ns/g" \
+		    -e "s/__TENANT__/$$tenant/g" -e "s/__TEAM__/$$team/g" \
+		    deploy/40-collectors/instrumentation.template.yaml | $(KUBECTL) apply -f - ; \
+	done
 
 keycloak: namespaces ## Deploy Keycloak (OIDC) with a realm generated from tenants.yaml
 	@echo ">> Keycloak (OIDC identity provider)"
@@ -150,6 +158,11 @@ grafana: repos ## Deploy Grafana (Keycloak SSO) and bootstrap orgs/teams/users/d
 	@$(KUBECTL) -n $(NS_OBS) delete job grafana-bootstrap --ignore-not-found
 	@$(KUBECTL) apply -f deploy/50-grafana/bootstrap-job.yaml
 	@$(KUBECTL) -n $(NS_OBS) wait --for=condition=complete job/grafana-bootstrap --timeout=5m
+	@# org_mapping resolves org names -> IDs at startup, but the bootstrap creates those orgs
+	@# only just now, so restart Grafana to re-resolve (else SSO users land in no org).
+	@echo ">> Restarting Grafana so org_mapping picks up the new orgs"
+	@$(KUBECTL) -n $(NS_OBS) rollout restart deployment/grafana
+	@$(KUBECTL) -n $(NS_OBS) rollout status deployment/grafana --timeout=5m
 
 build: ## Build the synthetic app image into minikube's docker
 	@echo ">> Building otel-synthetic:latest inside minikube"
@@ -202,14 +215,16 @@ keycloak-info: ## Print the Grafana/Keycloak URLs and demo logins
 	@IP=$$(minikube -p $(MINIKUBE_PROFILE) ip); \
 	 echo "Grafana:       http://grafana.$$IP.nip.io      (local fallback: admin/admin)"; \
 	 echo "Keycloak:      http://keycloak.$$IP.nip.io     (admin console /admin , admin/admin)"; \
+	 echo "RustFS:        http://rustfs.$$IP.nip.io        (otel-demo / otel-demo-secret-key-change-me)"; \
 	 echo "Realm:         otel-101"; \
 	 echo ""; \
-	 echo "Open Grafana, click 'Sign in with Keycloak', and log in as:"; \
-	 echo "   alice           -> Tenant A / Editor"; \
-	 echo "   bob             -> Tenant A / Viewer"; \
-	 echo "   carol           -> Tenant B / Editor"; \
-	 echo "   auditor         -> Viewer in BOTH tenants"; \
-	 echo "   platform-admin  -> Grafana server admin"; \
+	 echo "Each team is its own tenant+org, so a user sees ONLY the team(s) they can access:"; \
+	 echo "   alice           -> Payments team only"; \
+	 echo "   bob             -> Onboarding team only"; \
+	 echo "   carol           -> Trading team only"; \
+	 echo "   dave            -> both Tenant A teams (switch orgs)"; \
+	 echo "   auditor         -> all four teams (switch orgs)"; \
+	 echo "   platform-admin  -> Grafana server admin (every org)"; \
 	 echo "Passwords are in config/tenants.yaml (users[].password)."
 
 rustfs-console: ## Port-forward the RustFS console to http://localhost:9001
@@ -227,8 +242,7 @@ down: ## Remove the stack but keep the minikube cluster
 	@echo ">> Removing workloads, collectors, backends, storage, grafana, operator"
 	@$(KUBECTL) -n $(NS_OBS) delete ingress grafana keycloak --ignore-not-found 2>/dev/null || true
 	@for t in $(TEAMS); do ns=$${t%%:*}; $(KUBECTL) delete ns $$ns --ignore-not-found; done
-	@$(KUBECTL) delete -f deploy/40-collectors/instrumentation.yaml --ignore-not-found 2>/dev/null || true
-	@$(KUBECTL) delete -f deploy/40-collectors/gateways.yaml --ignore-not-found 2>/dev/null || true
+	@# per-team gateway collectors + Instrumentation CRs are removed with their namespaces below
 	@$(HELM) uninstall grafana -n $(NS_OBS) 2>/dev/null || true
 	@$(KUBECTL) delete -f deploy/45-keycloak/keycloak.yaml --ignore-not-found 2>/dev/null || true
 	@$(HELM) uninstall tempo -n $(NS_OBS) 2>/dev/null || true

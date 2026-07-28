@@ -2,87 +2,94 @@
 # SINGLE SOURCE OF TRUTH for the multi-tenant topology.
 #
 # Everything downstream reads this file:
-#   - deploy/40-collectors  -> one gateway collector + Instrumentation per tenant
-#   - deploy/60-workloads    -> one synthetic app per team
-#   - tools/grafana-bootstrap -> Grafana orgs / teams / users / folders / datasources
+#   - deploy/40-collectors    -> one gateway collector + Instrumentation PER TEAM
+#   - deploy/60-workloads     -> one synthetic app per team
+#   - tools/grafana-bootstrap -> Grafana orgs + datasources + users
+#   - tools/keycloak-realm    -> Keycloak groups + users
 #
-# Model (see README):
-#   tenant  -> HARD isolation: a Mimir/Loki/Tempo tenant (X-Scope-OrgID) + a Grafana Org
-#   team    -> SOFT isolation: its own namespace + a Grafana Team + Folder (shares tenant data)
-#   role    -> Grafana org role, plus special cross-cutting users (audit, platform-admin)
+# Model (see README): the isolation boundary is the TEAM.
+#   team -> HARD isolation: its own backend tenant (X-Scope-OrgID) AND its own Grafana Org.
+#           A team member's org datasource carries only that team's tenant id, so Explore/
+#           queries are physically scoped to that team (Grafana OSS has no LBAC/RBAC).
+#   tenant-level access -> membership in BOTH of a tenant's team orgs (switch via the org menu).
+#
+# Grafana OSS org roles (Viewer/Editor/Admin) do NOT scope data, so everyone is Editor.
 # =============================================================================
 
 # Object-storage tenant header used across Mimir/Loki/Tempo.
 orgIdHeader: X-Scope-OrgID
 
-tenants:
-  - name: tenant-a
-    displayName: "Tenant A (Retail Bank)"
-    # X-Scope-OrgID value stamped on every signal leaving this tenant's gateway.
-    orgId: tenant-a
-    grafanaOrg: "Tenant A"
-    teams:
-      - name: team-1
-        namespace: tenant-a-team-1
-        displayName: "Payments"
-        service: payments
-      - name: team-2
-        namespace: tenant-a-team-2
-        displayName: "Onboarding"
-        service: onboarding
+# Each team is a hard isolation boundary.
+#   tenantId   : the X-Scope-OrgID its signals are written under (also its k8s namespace)
+#   grafanaOrg : the Grafana Organization whose datasources read only that tenantId
+#   group      : the Keycloak group that maps to that org (see org_mapping in grafana values)
+teams:
+  - namespace: tenant-a-team-1
+    service: payments
+    tenantId: tenant-a-team-1
+    grafanaOrg: "Tenant-A-Payments"
+    group: payments
+    tenant: tenant-a
+    team: team-1
+  - namespace: tenant-a-team-2
+    service: onboarding
+    tenantId: tenant-a-team-2
+    grafanaOrg: "Tenant-A-Onboarding"
+    group: onboarding
+    tenant: tenant-a
+    team: team-2
+  - namespace: tenant-b-team-1
+    service: trading
+    tenantId: tenant-b-team-1
+    grafanaOrg: "Tenant-B-Trading"
+    group: trading
+    tenant: tenant-b
+    team: team-1
+  - namespace: tenant-b-team-2
+    service: reporting
+    tenantId: tenant-b-team-2
+    grafanaOrg: "Tenant-B-Reporting"
+    group: reporting
+    tenant: tenant-b
+    team: team-2
 
-  - name: tenant-b
-    displayName: "Tenant B (Asset Mgmt)"
-    orgId: tenant-b
-    grafanaOrg: "Tenant B"
-    teams:
-      - name: team-1
-        namespace: tenant-b-team-1
-        displayName: "Trading"
-        service: trading
-      - name: team-2
-        namespace: tenant-b-team-2
-        displayName: "Reporting"
-        service: reporting
+# Cross-cutting Keycloak groups that fan out to several orgs (see org_mapping in
+# deploy/50-grafana/values.yaml, which is the authoritative group -> org list):
+#   tenant-a        -> Tenant A - Payments + Tenant A - Onboarding
+#   tenant-b        -> Tenant B - Trading  + Tenant B - Reporting
+#   auditors        -> all four team orgs
+#   platform-admins -> Grafana server admin (via role_attribute_path)
 
-# Users provisioned by tools/grafana-bootstrap.
-# role: Grafana org role (Admin | Editor | Viewer).
-# orgs: which Grafana org(s) the user belongs to and with which role.
-#   Use "*" to mean "every tenant org" (that is how the cross-tenant audit role works).
-# serverAdmin: true grants Grafana *server* admin (can see/switch every org).
+# Users. `groups` are Keycloak groups; SSO maps them to Grafana orgs. The bootstrap also
+# creates matching local users (admin/admin-style fallback) in the same orgs.
 users:
-  - login: platform-admin
-    name: "Platform Admin"
-    password: "admin-please-change"
-    serverAdmin: true
-    orgs:
-      - { org: "*", role: Admin }
+  - login: alice
+    name: "Alice Payments"
+    password: "alice-please-change"
+    groups: [payments]                 # sees ONLY the payments team
+
+  - login: bob
+    name: "Bob Onboarding"
+    password: "bob-please-change"
+    groups: [onboarding]               # sees ONLY the onboarding team
+
+  - login: carol
+    name: "Carol Trading"
+    password: "carol-please-change"
+    groups: [trading]                  # sees ONLY the trading team
+
+  - login: dave
+    name: "Dave TenantA Lead"
+    password: "dave-please-change"
+    groups: [tenant-a]                 # sees BOTH Tenant A teams (switch orgs)
 
   - login: auditor
     name: "Compliance Auditor"
     password: "audit-please-change"
-    serverAdmin: false
-    # Read-only across BOTH tenant orgs -> the cross-tenant audit role.
-    orgs:
-      - { org: "*", role: Viewer }
+    groups: [auditors]                 # sees ALL four teams (switch orgs)
 
-  - login: alice
-    name: "Alice (Tenant A / Payments lead)"
-    password: "alice-please-change"
-    serverAdmin: false
-    orgs:
-      - { org: "Tenant A", role: Editor, team: "Payments" }
-
-  - login: bob
-    name: "Bob (Tenant A / Onboarding)"
-    password: "bob-please-change"
-    serverAdmin: false
-    orgs:
-      - { org: "Tenant A", role: Viewer, team: "Onboarding" }
-
-  - login: carol
-    name: "Carol (Tenant B / Trading lead)"
-    password: "carol-please-change"
-    serverAdmin: false
-    orgs:
-      - { org: "Tenant B", role: Editor, team: "Trading" }
+  - login: platform-admin
+    name: "Platform Admin"
+    password: "admin-please-change"
+    serverAdmin: true                  # Grafana server admin (every org)
+    groups: [platform-admins]

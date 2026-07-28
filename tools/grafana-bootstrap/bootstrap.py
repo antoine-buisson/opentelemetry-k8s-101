@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
-"""Idempotently provision Grafana OSS multi-tenancy from config/tenants.yaml.
+"""Idempotently provision Grafana OSS from config/tenants.yaml.
 
-Grafana OSS cannot provision orgs / teams / users (and can only provision datasources
-into an org that already exists) from files, so we drive the HTTP API instead.
+The isolation boundary is the TEAM. For each team this creates:
+  - a Grafana Organization (team.grafanaOrg)
+  - Mimir / Loki / Tempo datasources in that org, each injecting ONLY that team's
+    X-Scope-OrgID (team.tenantId). Because Grafana OSS has no LBAC/RBAC, this single-tenant
+    datasource is what physically scopes a member's queries to their team's data.
+  - a small overview dashboard
 
-For each tenant this creates:
-  - a Grafana Organization
-  - Mimir / Loki / Tempo datasources in that org, each injecting the tenant's
-    X-Scope-OrgID header (this is what scopes queries to the tenant's data)
-  - one Team + one Folder per team, with the team granted Edit on its folder
-
-Then it creates the users from tenants.yaml, assigns org roles (role "*" == every tenant
-org, used for the cross-tenant `auditor`), sets server-admin where requested, and adds
-users to their team.
+Then it creates the users, sets server-admin where requested, and adds each user to the orgs
+implied by their Keycloak `groups` (so local login mirrors what SSO org_mapping does):
+  team group (payments/onboarding/...) -> that team org
+  tenant group (tenant-a/tenant-b)     -> both of that tenant's team orgs
+  auditors                             -> all team orgs
+  platform-admins                      -> none here (granted server admin instead)
+Everyone is Editor (OSS org roles do not scope data).
 
 Re-runnable: every create is guarded by a lookup first.
 
-Env:
-  GRAFANA_URL       (default http://localhost:3000)
-  GRAFANA_USER      (default admin)
-  GRAFANA_PASSWORD  (default admin)
-  TENANTS_FILE      (default /config/tenants.yaml)
+Env: GRAFANA_URL, GRAFANA_USER, GRAFANA_PASSWORD, TENANTS_FILE
 """
 import os
 import sys
@@ -33,9 +31,6 @@ BASE = os.environ.get("GRAFANA_URL", "http://localhost:3000").rstrip("/")
 USER = os.environ.get("GRAFANA_USER", "admin")
 PASSWORD = os.environ.get("GRAFANA_PASSWORD", "admin")
 TENANTS_FILE = os.environ.get("TENANTS_FILE", "/config/tenants.yaml")
-
-# Grafana folder/dashboard permission levels.
-PERM_VIEW, PERM_EDIT, PERM_ADMIN = 1, 2, 4
 
 session = requests.Session()
 session.auth = (USER, PASSWORD)
@@ -52,8 +47,7 @@ def log(msg):
 
 
 def api(method, path, **kw):
-    r = session.request(method, f"{BASE}{path}", timeout=30, **kw)
-    return r
+    return session.request(method, f"{BASE}{path}", timeout=30, **kw)
 
 
 def wait_ready(timeout=300):
@@ -81,7 +75,6 @@ def ensure_org(name):
         oid = r.json()["orgId"]
         log(f"  created org '{name}' (id={oid})")
         return oid
-    # Race / already exists -> look up again.
     r = api("GET", f"/api/orgs/name/{name}")
     r.raise_for_status()
     return r.json()["id"]
@@ -89,53 +82,67 @@ def ensure_org(name):
 
 def ensure_admin_in_org(org_id):
     # The admin must be a member of an org to switch into it and manage it.
-    api("POST", f"/api/orgs/{org_id}/users",
-        json={"loginOrEmail": USER, "role": "Admin"})
-    r = api("POST", f"/api/user/using/{org_id}")
-    r.raise_for_status()
+    api("POST", f"/api/orgs/{org_id}/users", json={"loginOrEmail": USER, "role": "Admin"})
+    api("POST", f"/api/user/using/{org_id}").raise_for_status()
 
 
 # ---- Datasources ------------------------------------------------------------
 def ensure_datasource(uid, name, ds_type, url, org_header_value, extra_json=None,
                       is_default=False):
-    """Create a datasource with a fixed uid so datasources can cross-reference each
-    other for correlation. Delete-then-create keeps re-runs deterministic."""
+    """Create a datasource with a fixed uid (so datasources can cross-reference each other for
+    correlation) that injects a single team's X-Scope-OrgID. Delete-then-create for idempotency."""
     payload = {
-        "uid": uid,
-        "name": name,
-        "type": ds_type,
-        "access": "proxy",
-        "url": url,
+        "uid": uid, "name": name, "type": ds_type, "access": "proxy", "url": url,
         "isDefault": is_default,
-        # httpHeaderName1/Value1 injects the tenant's X-Scope-OrgID on every query.
         "jsonData": {"httpHeaderName1": "X-Scope-OrgID", **(extra_json or {})},
         "secureJsonData": {"httpHeaderValue1": org_header_value},
     }
     if api("GET", f"/api/datasources/name/{name}").ok:
         api("DELETE", f"/api/datasources/name/{name}")
-    r = api("POST", "/api/datasources", json=payload)
-    r.raise_for_status()
-    log(f"    datasource {name} (uid={uid})")
+    api("POST", "/api/datasources", json=payload).raise_for_status()
+    log(f"    datasource {name} (uid={uid}, X-Scope-OrgID={org_header_value})")
+
+
+def datasources_for_org(tenant_id):
+    """Create the three correlated datasources for a team org, scoped to one tenant id."""
+    mimir_uid, loki_uid, tempo_uid = (f"mimir-{tenant_id}", f"loki-{tenant_id}",
+                                      f"tempo-{tenant_id}")
+    ensure_datasource(mimir_uid, "Mimir", "prometheus", MIMIR_URL, tenant_id, is_default=True,
+                      extra_json={"httpMethod": "POST",
+                                  "exemplarTraceIdDestinations": [
+                                      {"name": "trace_id", "datasourceUid": tempo_uid}]})
+    ensure_datasource(loki_uid, "Loki", "loki", LOKI_URL, tenant_id,
+                      extra_json={"derivedFields": [{
+                          "name": "TraceID", "matcherType": "label", "matcherRegex": "trace_id",
+                          "datasourceUid": tempo_uid, "url": "${__value.raw}",
+                          "urlDisplayLabel": "View trace"}]})
+    ensure_datasource(tempo_uid, "Tempo", "tempo", TEMPO_URL, tenant_id,
+                      extra_json={
+                          "tracesToLogsV2": {"datasourceUid": loki_uid,
+                                             "spanStartTimeShift": "-5m", "spanEndTimeShift": "5m",
+                                             "filterByTraceID": False, "filterBySpanID": False,
+                                             "tags": [{"key": "service.name", "value": "service_name"}]},
+                          "tracesToMetrics": {"datasourceUid": mimir_uid,
+                                              "spanStartTimeShift": "-5m", "spanEndTimeShift": "5m",
+                                              "queries": [{"name": "Request rate by service",
+                                                           "query": "sum by (job) (rate(http_server_duration_count[5m]))"}]},
+                          "serviceMap": {"datasourceUid": mimir_uid},
+                          "nodeGraph": {"enabled": True}})
+    return mimir_uid, loki_uid
 
 
 # ---- Dashboard --------------------------------------------------------------
 def build_dashboard(uid, title, mimir_uid, loki_uid):
-    """A small RED-metrics + logs overview. Metric panels emit exemplars (dots that
-    link to a trace); the logs panel exposes a TraceID link (Loki derived field)."""
     prom = {"type": "prometheus", "uid": mimir_uid}
     loki = {"type": "loki", "uid": loki_uid}
 
     def ts(pid, ptitle, expr, x, unit):
-        return {
-            "id": pid, "type": "timeseries", "title": ptitle, "datasource": prom,
-            "gridPos": {"x": x, "y": 0, "w": 8, "h": 9},
-            "fieldConfig": {"defaults": {"unit": unit}, "overrides": []},
-            "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
-            "targets": [{
-                "refId": "A", "datasource": prom, "expr": expr,
-                "legendFormat": "{{job}}", "exemplar": True,
-            }],
-        }
+        return {"id": pid, "type": "timeseries", "title": ptitle, "datasource": prom,
+                "gridPos": {"x": x, "y": 0, "w": 8, "h": 9},
+                "fieldConfig": {"defaults": {"unit": unit}, "overrides": []},
+                "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+                "targets": [{"refId": "A", "datasource": prom, "expr": expr,
+                             "legendFormat": "{{job}}", "exemplar": True}]}
 
     panels = [
         ts(1, "Request rate (req/s) by service",
@@ -146,21 +153,16 @@ def build_dashboard(uid, title, mimir_uid, loki_uid):
         ts(3, "p95 latency (ms) by service",
            "histogram_quantile(0.95, sum by (le, job) (rate(http_server_duration_bucket[$__rate_interval])))",
            16, "ms"),
-        {
-            "id": 4, "type": "logs",
-            "title": "Logs (open a line, click TraceID to jump to the trace)",
-            "datasource": loki,
-            "gridPos": {"x": 0, "y": 9, "w": 24, "h": 11},
-            "options": {"showTime": True, "wrapLogMessage": True,
-                        "enableLogDetails": True, "sortOrder": "Descending"},
-            "targets": [{"refId": "A", "datasource": loki,
-                         "expr": '{service_name=~".+"}', "queryType": "range"}],
-        },
+        {"id": 4, "type": "logs",
+         "title": "Logs (open a line, click TraceID to jump to the trace)", "datasource": loki,
+         "gridPos": {"x": 0, "y": 9, "w": 24, "h": 11},
+         "options": {"showTime": True, "wrapLogMessage": True, "enableLogDetails": True,
+                     "sortOrder": "Descending"},
+         "targets": [{"refId": "A", "datasource": loki, "expr": '{service_name=~".+"}',
+                      "queryType": "range"}]},
     ]
-    return {
-        "uid": uid, "title": title, "tags": ["otel-101"], "schemaVersion": 39,
-        "time": {"from": "now-15m", "to": "now"}, "refresh": "10s", "panels": panels,
-    }
+    return {"uid": uid, "title": title, "tags": ["otel-101"], "schemaVersion": 39,
+            "time": {"from": "now-15m", "to": "now"}, "refresh": "10s", "panels": panels}
 
 
 def ensure_dashboard(org_id, uid, title, mimir_uid, loki_uid):
@@ -168,48 +170,14 @@ def ensure_dashboard(org_id, uid, title, mimir_uid, loki_uid):
     dash = build_dashboard(uid, title, mimir_uid, loki_uid)
     r = api("POST", "/api/dashboards/db",
             json={"dashboard": dash, "folderUid": "", "overwrite": True})
-    if r.ok:
-        log(f"    dashboard '{title}'")
-    else:
-        log(f"    dashboard '{title}' FAILED: {r.status_code} {r.text[:200]}")
-
-
-# ---- Teams & folders --------------------------------------------------------
-def ensure_team(name):
-    r = api("GET", "/api/teams/search", params={"name": name})
-    if r.ok and r.json().get("teams"):
-        for t in r.json()["teams"]:
-            if t["name"] == name:
-                return t["id"]
-    r = api("POST", "/api/teams", json={"name": name})
-    if r.ok:
-        tid = r.json()["teamId"]
-        log(f"    created team '{name}' (id={tid})")
-        return tid
-    r = api("GET", "/api/teams/search", params={"name": name})
-    r.raise_for_status()
-    return r.json()["teams"][0]["id"]
-
-
-def ensure_folder(title, uid):
-    r = api("GET", f"/api/folders/{uid}")
-    if not r.ok:
-        r = api("POST", "/api/folders", json={"uid": uid, "title": title})
-        if r.ok:
-            log(f"    created folder '{title}'")
-    return uid
-
-
-def set_folder_team_permission(uid, team_id, permission):
-    api("POST", f"/api/folders/{uid}/permissions",
-        json={"items": [{"teamId": team_id, "permission": permission}]})
+    log(f"    dashboard '{title}'" if r.ok
+        else f"    dashboard '{title}' FAILED: {r.status_code} {r.text[:200]}")
 
 
 # ---- Users ------------------------------------------------------------------
 def ensure_user(login, name, password, email):
-    # The email MUST match the Keycloak user's email so that a Keycloak SSO login links to
-    # this same account (with oauth_allow_insecure_email_lookup) instead of trying to create
-    # a duplicate and colliding on the login. See tools/keycloak-realm/generate_realm.py.
+    # Email MUST match the Keycloak user so an SSO login links to this account (with
+    # oauth_allow_insecure_email_lookup) instead of creating a duplicate and colliding.
     existing = api("GET", "/api/users/lookup", params={"loginOrEmail": login})
     if existing.ok:
         uid = existing.json()["id"]
@@ -227,114 +195,58 @@ def ensure_user(login, name, password, email):
 
 
 def set_server_admin(user_id, is_admin):
-    api("PUT", f"/api/admin/users/{user_id}/permissions",
-        json={"isGrafanaAdmin": is_admin})
+    api("PUT", f"/api/admin/users/{user_id}/permissions", json={"isGrafanaAdmin": is_admin})
 
 
-def add_user_to_org(org_id, login, role):
-    # Switch admin into the org first (org-scoped endpoint).
+def add_user_to_org(org_id, login, role="Editor"):
     api("POST", f"/api/user/using/{org_id}")
-    r = api("POST", f"/api/orgs/{org_id}/users",
-            json={"loginOrEmail": login, "role": role})
+    r = api("POST", f"/api/orgs/{org_id}/users", json={"loginOrEmail": login, "role": role})
     if r.status_code == 409:  # already a member -> update role
-        api("PATCH", f"/api/orgs/{org_id}/users",
-            json={"loginOrEmail": login, "role": role})
-
-
-def add_user_to_team(org_id, team_id, user_id):
-    api("POST", f"/api/user/using/{org_id}")
-    api("POST", f"/api/teams/{team_id}/members", json={"userId": user_id})
+        api("PATCH", f"/api/orgs/{org_id}/users", json={"loginOrEmail": login, "role": role})
 
 
 # ---- Main -------------------------------------------------------------------
+def group_to_orgs(teams):
+    """Keycloak group -> list of Grafana org names (mirrors org_mapping in grafana values)."""
+    g = {}
+    all_orgs = []
+    for t in teams:
+        all_orgs.append(t["grafanaOrg"])
+        g.setdefault(t["group"], []).append(t["grafanaOrg"])          # team group -> its org
+        g.setdefault(t["tenant"], []).append(t["grafanaOrg"])         # tenant group -> its teams
+    g["auditors"] = list(all_orgs)                                    # auditors -> every org
+    g["platform-admins"] = []                                         # server admin only
+    return g
+
+
 def main():
     with open(TENANTS_FILE) as f:
         cfg = yaml.safe_load(f)
+    teams = cfg["teams"]
 
     wait_ready()
 
-    # org name -> org id ; (org id, team name) -> team id
+    log("== Provisioning team orgs (org + single-tenant datasources + dashboard) ==")
     org_ids = {}
-    team_ids = {}
-
-    log("== Provisioning tenants (orgs, datasources, teams, folders) ==")
-    for tenant in cfg["tenants"]:
-        org_name = tenant["grafanaOrg"]
-        org_val = tenant["orgId"]
+    for t in teams:
+        org_name, tenant_id = t["grafanaOrg"], t["tenantId"]
         oid = ensure_org(org_name)
         org_ids[org_name] = oid
         ensure_admin_in_org(oid)
-        log(f"  org '{org_name}' -> X-Scope-OrgID '{org_val}'")
+        log(f"  org '{org_name}' -> X-Scope-OrgID '{tenant_id}'")
+        mimir_uid, loki_uid = datasources_for_org(tenant_id)
+        ensure_dashboard(oid, f"overview-{tenant_id}", f"{org_name} - Overview",
+                         mimir_uid, loki_uid)
 
-        # Per-org unique uids so the three datasources can cross-reference each other.
-        mimir_uid, loki_uid, tempo_uid = (f"mimir-{org_val}", f"loki-{org_val}",
-                                          f"tempo-{org_val}")
-
-        # Mimir: exemplars link a metric sample to the trace that produced it.
-        ensure_datasource(
-            mimir_uid, "Mimir", "prometheus", MIMIR_URL, org_val, is_default=True,
-            extra_json={
-                "httpMethod": "POST",
-                "exemplarTraceIdDestinations": [
-                    {"name": "trace_id", "datasourceUid": tempo_uid}],
-            })
-        # Loki: derived field turns the trace_id label into a link to Tempo.
-        ensure_datasource(
-            loki_uid, "Loki", "loki", LOKI_URL, org_val,
-            extra_json={
-                "derivedFields": [{
-                    "name": "TraceID", "matcherType": "label",
-                    "matcherRegex": "trace_id", "datasourceUid": tempo_uid,
-                    "url": "${__value.raw}", "urlDisplayLabel": "View trace",
-                }],
-            })
-        # Tempo: trace -> logs (by service) and trace -> metrics + service map.
-        ensure_datasource(
-            tempo_uid, "Tempo", "tempo", TEMPO_URL, org_val,
-            extra_json={
-                "tracesToLogsV2": {
-                    "datasourceUid": loki_uid,
-                    "spanStartTimeShift": "-5m", "spanEndTimeShift": "5m",
-                    "filterByTraceID": False, "filterBySpanID": False,
-                    "tags": [{"key": "service.name", "value": "service_name"}],
-                },
-                "tracesToMetrics": {
-                    "datasourceUid": mimir_uid,
-                    "spanStartTimeShift": "-5m", "spanEndTimeShift": "5m",
-                    "queries": [{"name": "Request rate by service",
-                                 "query": "sum by (job) (rate(http_server_duration_count[5m]))"}],
-                },
-                "serviceMap": {"datasourceUid": mimir_uid},
-                "nodeGraph": {"enabled": True},
-            })
-
-        ensure_dashboard(oid, f"overview-{org_val}",
-                         f"{org_name} - Overview", mimir_uid, loki_uid)
-
-        for team in tenant["teams"]:
-            tname = team["displayName"]
-            tid = ensure_team(tname)
-            team_ids[(oid, tname)] = tid
-            folder_uid = f"{tenant['name']}-{team['name']}"
-            ensure_folder(tname, folder_uid)
-            set_folder_team_permission(folder_uid, tid, PERM_EDIT)
-
-    log("== Provisioning users (roles, server-admin, team membership) ==")
-    tenant_orgs = [t["grafanaOrg"] for t in cfg["tenants"]]
+    log("== Provisioning users (server-admin + org membership from groups) ==")
+    g2o = group_to_orgs(teams)
     for u in cfg.get("users", []):
-        uid = ensure_user(u["login"], u["name"], u["password"],
-                          f"{u['login']}@otel-101.local")
+        uid = ensure_user(u["login"], u["name"], u["password"], f"{u['login']}@otel-101.local")
         set_server_admin(uid, bool(u.get("serverAdmin", False)))
-        for entry in u.get("orgs", []):
-            targets = tenant_orgs if entry["org"] == "*" else [entry["org"]]
-            for org_name in targets:
-                oid = org_ids[org_name]
-                add_user_to_org(oid, u["login"], entry["role"])
-                if entry.get("team"):
-                    tid = team_ids.get((oid, entry["team"]))
-                    if tid:
-                        add_user_to_team(oid, tid, uid)
-        log(f"  user '{u['login']}' configured")
+        orgs = sorted({o for grp in u.get("groups", []) for o in g2o.get(grp, [])})
+        for org_name in orgs:
+            add_user_to_org(org_ids[org_name], u["login"])
+        log(f"  user '{u['login']}' -> orgs {orgs or '[server admin]'}")
 
     log("Grafana bootstrap complete.")
 

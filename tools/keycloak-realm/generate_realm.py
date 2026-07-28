@@ -38,39 +38,19 @@ def grafana_redirects():
     return uris
 
 
-def group_for(org_display, role, is_server_admin, org_name_by_display):
-    """Map one (org, role) assignment to a Keycloak group name."""
-    if org_display == "*":
-        if role == "Admin" and is_server_admin:
-            return "platform-admins"
-        return "auditors"  # cross-tenant read-only (Viewer in all orgs)
-    prefix = org_name_by_display.get(org_display)
-    if not prefix:
-        return None
-    return f"{prefix}-{role.lower()}s"  # e.g. tenant-a-editors
-
-
 def build_realm(cfg):
-    # Grafana org display name ("Tenant A") -> tenant short name ("tenant-a"), for group prefixes.
-    org_name_by_display = {t["grafanaOrg"]: t["name"] for t in cfg["tenants"]}
+    teams = cfg["teams"]
 
-    # Full, stable taxonomy: 3 roles x each tenant, plus the two cross-cutting groups.
-    group_names = []
-    for t in cfg["tenants"]:
-        for role in ("admins", "editors", "viewers"):
-            group_names.append(f"{t['name']}-{role}")
+    # Group taxonomy = one group per team, one per tenant, plus the two cross-cutting groups.
+    # Grafana's org_mapping (in the Grafana values) maps each of these to one or more orgs.
+    group_names = [t["group"] for t in teams]                         # payments, onboarding, ...
+    group_names += sorted({t["tenant"] for t in teams})               # tenant-a, tenant-b
     group_names += ["auditors", "platform-admins"]
-
     groups = [{"name": g, "path": f"/{g}"} for g in group_names]
 
     users = []
     for u in cfg.get("users", []):
-        server_admin = bool(u.get("serverAdmin", False))
-        member_of = []
-        for entry in u.get("orgs", []):
-            g = group_for(entry["org"], entry["role"], server_admin, org_name_by_display)
-            if g and f"/{g}" not in member_of:
-                member_of.append(f"/{g}")
+        member_of = [f"/{g}" for g in u.get("groups", [])]
         # Keycloak's default user profile rejects names with characters like ( ) /, which
         # would dynamically trigger a VERIFY_PROFILE action ("Account is not fully set up").
         # Use only the clean leading part of the display name (before any parenthetical).
