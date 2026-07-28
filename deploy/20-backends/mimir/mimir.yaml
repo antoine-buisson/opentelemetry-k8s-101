@@ -11,6 +11,11 @@ server:
   grpc_listen_port: 9095
   log_level: info
 
+# The activity tracker defaults to ./metrics-activity.log in the (non-writable) working
+# dir; point it at the writable data volume so the non-root container can start.
+activity_tracker:
+  filepath: /data/metrics-activity.log
+
 # Single-node rings.
 ingester:
   ring:
@@ -41,6 +46,10 @@ blocks_storage:
 
 ruler_storage:
   storage_prefix: ruler
+
+ruler:
+  # Local scratch dir for rule evaluation (defaults to ./data-ruler in the working dir).
+  rule_path: /data/ruler
 
 compactor:
   data_dir: /data/compactor

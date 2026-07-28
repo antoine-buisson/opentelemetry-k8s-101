@@ -38,6 +38,7 @@ spec:
       containers:
         - name: mimir
           image: grafana/mimir:3.1.2
+          workingDir: /data   # writable volume; keeps any relative-path defaults inside the PVC
           args:
             - -target=all
             - -config.file=/etc/mimir/mimir.yaml

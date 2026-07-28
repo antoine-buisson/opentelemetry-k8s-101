@@ -13,7 +13,7 @@ AK="$(kubectl -n "$NS" get secret s3-credentials -o jsonpath='{.data.AWS_ACCESS_
 SK="$(kubectl -n "$NS" get secret s3-credentials -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' | base64 -d)"
 
 kubectl -n "$NS" run smoke-mc --rm -i --restart=Never --image=minio/mc:latest \
-  --env="AK=$AK" --env="SK=$SK" -- /bin/sh -c '
+  --env="AK=$AK" --env="SK=$SK" --command -- /bin/sh -c '
     set -e
     mc alias set r http://rustfs-svc.observability.svc.cluster.local:9000 "$AK" "$SK" >/dev/null
     echo "hello-otel-101" > /tmp/smoke.txt
@@ -27,7 +27,7 @@ kubectl -n "$NS" run smoke-mc --rm -i --restart=Never --image=minio/mc:latest \
 
 echo ""
 echo "== 2/2  Backend readiness =="
-kubectl -n "$NS" run smoke-curl --rm -i --restart=Never --image=curlimages/curl:latest -- /bin/sh -c '
+kubectl -n "$NS" run smoke-curl --rm -i --restart=Never --image=curlimages/curl:latest --command -- /bin/sh -c '
   for target in "mimir:8080/ready" "loki:3100/ready" "tempo:3200/ready"; do
     name=${target%%:*}
     if curl -sf "http://${target}" >/dev/null 2>&1; then
