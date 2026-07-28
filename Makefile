@@ -171,9 +171,11 @@ ingress: ## Create nip.io Ingress for Grafana + Keycloak (no port-forward needed
 	@IP=$$(minikube -p $(MINIKUBE_PROFILE) ip); \
 	 sed -e "s/__GRAFANA_HOST__/grafana.$$IP.nip.io/g" \
 	     -e "s/__KEYCLOAK_HOST__/keycloak.$$IP.nip.io/g" \
+		 -e "s/__RUSTFS_HOST__/rustfs.$$IP.nip.io/g" \
 	     deploy/80-ingress/ingress.template.yaml | $(KUBECTL) apply -f -; \
 	 echo "   Grafana:  http://grafana.$$IP.nip.io"; \
-	 echo "   Keycloak: http://keycloak.$$IP.nip.io"
+	 echo "   Keycloak: http://keycloak.$$IP.nip.io"; \
+	 echo "   RustFS:   http://rustfs.$$IP.nip.io"
 
 # ---- Aggregate --------------------------------------------------------------
 up: minikube-start storage backends operator collectors keycloak grafana ingress workloads ## Bring the whole stack up (from scratch)

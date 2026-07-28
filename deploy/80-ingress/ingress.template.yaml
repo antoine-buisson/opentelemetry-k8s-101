@@ -45,3 +45,22 @@ spec:
                 name: keycloak
                 port:
                   number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rustfs
+  namespace: observability
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: __RUSTFS_HOST__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rustfs-svc
+                port:
+                  number: 9001
