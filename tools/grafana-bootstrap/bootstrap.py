@@ -206,12 +206,17 @@ def set_folder_team_permission(uid, team_id, permission):
 
 
 # ---- Users ------------------------------------------------------------------
-def ensure_user(login, name, password):
-    r = api("GET", "/api/users/lookup", params={"loginOrEmail": login})
-    if r.ok:
-        return r.json()["id"]
+def ensure_user(login, name, password, email):
+    # The email MUST match the Keycloak user's email so that a Keycloak SSO login links to
+    # this same account (with oauth_allow_insecure_email_lookup) instead of trying to create
+    # a duplicate and colliding on the login. See tools/keycloak-realm/generate_realm.py.
+    existing = api("GET", "/api/users/lookup", params={"loginOrEmail": login})
+    if existing.ok:
+        uid = existing.json()["id"]
+        api("PUT", f"/api/users/{uid}", json={"login": login, "name": name, "email": email})
+        return uid
     r = api("POST", "/api/admin/users",
-            json={"name": name, "login": login, "password": password})
+            json={"name": name, "login": login, "password": password, "email": email})
     if r.ok:
         uid = r.json()["id"]
         log(f"  created user '{login}' (id={uid})")
@@ -317,7 +322,8 @@ def main():
     log("== Provisioning users (roles, server-admin, team membership) ==")
     tenant_orgs = [t["grafanaOrg"] for t in cfg["tenants"]]
     for u in cfg.get("users", []):
-        uid = ensure_user(u["login"], u["name"], u["password"])
+        uid = ensure_user(u["login"], u["name"], u["password"],
+                          f"{u['login']}@otel-101.local")
         set_server_admin(uid, bool(u.get("serverAdmin", False)))
         for entry in u.get("orgs", []):
             targets = tenant_orgs if entry["org"] == "*" else [entry["org"]]

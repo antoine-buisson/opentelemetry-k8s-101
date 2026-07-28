@@ -1,0 +1,47 @@
+# Ingress for Grafana and Keycloak so you can use stable URLs instead of port-forwarding.
+# The Makefile renders __GRAFANA_HOST__ / __KEYCLOAK_HOST__ using nip.io wildcard DNS:
+#   grafana.<minikube-ip>.nip.io  and  keycloak.<minikube-ip>.nip.io
+# nip.io resolves those to the minikube IP with no /etc/hosts edits. On Linux + docker driver
+# the minikube IP:80 (ingress-nginx) is reachable from the host browser and from pods.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: observability
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"   # OAuth cookies can be large
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: __GRAFANA_HOST__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  namespace: observability
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: __KEYCLOAK_HOST__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080

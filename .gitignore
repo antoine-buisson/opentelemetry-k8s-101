@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 .venv/
+# Deploy-time generated files (realm JSON, Grafana OAuth URL overlay).
+.gen/

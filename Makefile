@@ -28,6 +28,9 @@ VER_TEMPO    := 2.2.3
 VER_GRAFANA  := 12.10.0
 VER_OTEL_OP  := 0.120.0
 
+# Keycloak NodePort. Reached at http://$(minikube ip):$(KEYCLOAK_NODEPORT) by both browser and pods.
+KEYCLOAK_NODEPORT := 30080
+
 KUBECTL := kubectl
 HELM    := helm
 
@@ -62,6 +65,7 @@ minikube-start: check-tools ## Start the minikube cluster
 			--cpus=$(MINIKUBE_CPUS) --memory=$(MINIKUBE_MEMORY) \
 			--kubernetes-version=$(K8S_VERSION)
 	@minikube -p $(MINIKUBE_PROFILE) addons enable metrics-server >/dev/null 2>&1 || true
+	@minikube -p $(MINIKUBE_PROFILE) addons enable ingress >/dev/null 2>&1 || true
 
 repos: ## Add/update the Helm repositories
 	@$(HELM) repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
@@ -113,10 +117,29 @@ collectors: ## Deploy per-tenant gateway collectors + Instrumentation CRs
 	@$(KUBECTL) apply -f deploy/40-collectors/gateways.yaml
 	@$(KUBECTL) apply -f deploy/40-collectors/instrumentation.yaml
 
-grafana: repos ## Deploy Grafana and bootstrap orgs/teams/users/datasources
+keycloak: namespaces ## Deploy Keycloak (OIDC) with a realm generated from tenants.yaml
+	@echo ">> Keycloak (OIDC identity provider)"
+	@mkdir -p .gen
+	@IP=$$(minikube -p $(MINIKUBE_PROFILE) ip); \
+	 docker run --rm -e GRAFANA_INGRESS_HOST=grafana.$$IP.nip.io -v "$$PWD":/w -w /w python:3.12-slim \
+		sh -c 'pip install -q pyyaml && python tools/keycloak-realm/generate_realm.py config/tenants.yaml /w/.gen/otel-101-realm.json'
+	@$(KUBECTL) create configmap keycloak-realm -n $(NS_OBS) \
+		--from-file=otel-101-realm.json=.gen/otel-101-realm.json \
+		--dry-run=client -o yaml | $(KUBECTL) apply -f -
+	@$(KUBECTL) apply -f deploy/45-keycloak/keycloak.yaml
+	@$(KUBECTL) -n $(NS_OBS) rollout restart deployment/keycloak >/dev/null 2>&1 || true
+	@$(KUBECTL) -n $(NS_OBS) rollout status deployment/keycloak --timeout=5m
+
+grafana: repos ## Deploy Grafana (Keycloak SSO) and bootstrap orgs/teams/users/datasources
 	@echo ">> Grafana"
-	@$(HELM) upgrade --install grafana grafana-community/grafana --version $(VER_GRAFANA) \
-		-n $(NS_OBS) -f deploy/50-grafana/values.yaml --wait --timeout 5m
+	@IP=$$(minikube -p $(MINIKUBE_PROFILE) ip); \
+	 GHOST=grafana.$$IP.nip.io; KHOST=keycloak.$$IP.nip.io; \
+	 mkdir -p .gen; \
+	 printf 'grafana.ini:\n  server:\n    root_url: http://%s/\n  auth.generic_oauth:\n    auth_url: http://%s/realms/otel-101/protocol/openid-connect/auth\n' \
+	   "$$GHOST" "$$KHOST" > .gen/grafana-oauth.yaml; \
+	 echo "   Grafana root_url: http://$$GHOST | Keycloak auth: http://$$KHOST"; \
+	 $(HELM) upgrade --install grafana grafana-community/grafana --version $(VER_GRAFANA) \
+		-n $(NS_OBS) -f deploy/50-grafana/values.yaml -f .gen/grafana-oauth.yaml --wait --timeout 5m
 	@$(KUBECTL) create configmap grafana-bootstrap-script -n $(NS_OBS) \
 		--from-file=bootstrap.py=tools/grafana-bootstrap/bootstrap.py \
 		--dry-run=client -o yaml | $(KUBECTL) apply -f -
@@ -143,13 +166,22 @@ workloads: build ## Deploy the per-team synthetic workloads
 		    deploy/60-workloads/workload.template.yaml | $(KUBECTL) apply -f - ; \
 	done
 
+ingress: ## Create nip.io Ingress for Grafana + Keycloak (no port-forward needed)
+	@echo ">> Ingress (nip.io)"
+	@IP=$$(minikube -p $(MINIKUBE_PROFILE) ip); \
+	 sed -e "s/__GRAFANA_HOST__/grafana.$$IP.nip.io/g" \
+	     -e "s/__KEYCLOAK_HOST__/keycloak.$$IP.nip.io/g" \
+	     deploy/80-ingress/ingress.template.yaml | $(KUBECTL) apply -f -; \
+	 echo "   Grafana:  http://grafana.$$IP.nip.io"; \
+	 echo "   Keycloak: http://keycloak.$$IP.nip.io"
+
 # ---- Aggregate --------------------------------------------------------------
-up: minikube-start storage backends operator collectors grafana workloads ## Bring the whole stack up (from scratch)
+up: minikube-start storage backends operator collectors keycloak grafana ingress workloads ## Bring the whole stack up (from scratch)
 	@echo ""
 	@echo "================================================================"
 	@echo " Stack is up. Next:"
-	@echo "   make status         # check everything is Ready"
-	@echo "   make grafana-forward # open Grafana on http://localhost:3000"
+	@echo "   make status          # check everything is Ready"
+	@echo "   make keycloak-info   # Grafana/Keycloak URLs (nip.io ingress) + demo logins"
 	@echo "================================================================"
 
 # ---- Ops --------------------------------------------------------------------
@@ -159,11 +191,24 @@ status: ## Show pods across all namespaces + collector CRs
 	@for t in $(TEAMS); do ns=$${t%%:*}; echo "== $$ns =="; $(KUBECTL) -n $$ns get pods 2>/dev/null || true; done
 	@echo "== collectors =="; $(KUBECTL) -n $(NS_OBS) get opentelemetrycollectors 2>/dev/null || true
 
-grafana-forward: ## Port-forward Grafana to http://localhost:3000
-	@echo "Grafana on http://localhost:3000"
-	@echo "  server admin: admin / admin      (switch orgs via the org menu)"
-	@echo "  see config/tenants.yaml for the per-role demo logins (platform-admin, auditor, alice, ...)"
+grafana-forward: ## Port-forward Grafana to http://localhost:3000 (local-admin fallback only)
+	@echo "Grafana on http://localhost:3000 (use admin/admin here)."
+	@echo "For Keycloak SSO use the ingress URL instead (make keycloak-info) — SSO redirects there."
 	@$(KUBECTL) -n $(NS_OBS) port-forward svc/grafana 3000:80
+
+keycloak-info: ## Print the Grafana/Keycloak URLs and demo logins
+	@IP=$$(minikube -p $(MINIKUBE_PROFILE) ip); \
+	 echo "Grafana:       http://grafana.$$IP.nip.io      (local fallback: admin/admin)"; \
+	 echo "Keycloak:      http://keycloak.$$IP.nip.io     (admin console /admin , admin/admin)"; \
+	 echo "Realm:         otel-101"; \
+	 echo ""; \
+	 echo "Open Grafana, click 'Sign in with Keycloak', and log in as:"; \
+	 echo "   alice           -> Tenant A / Editor"; \
+	 echo "   bob             -> Tenant A / Viewer"; \
+	 echo "   carol           -> Tenant B / Editor"; \
+	 echo "   auditor         -> Viewer in BOTH tenants"; \
+	 echo "   platform-admin  -> Grafana server admin"; \
+	 echo "Passwords are in config/tenants.yaml (users[].password)."
 
 rustfs-console: ## Port-forward the RustFS console to http://localhost:9001
 	@echo "RustFS console on http://localhost:9001 (login: otel-demo / otel-demo-secret-key-change-me)"
@@ -178,10 +223,12 @@ logs-bootstrap: ## Show the Grafana bootstrap job logs
 # ---- Teardown ---------------------------------------------------------------
 down: ## Remove the stack but keep the minikube cluster
 	@echo ">> Removing workloads, collectors, backends, storage, grafana, operator"
+	@$(KUBECTL) -n $(NS_OBS) delete ingress grafana keycloak --ignore-not-found 2>/dev/null || true
 	@for t in $(TEAMS); do ns=$${t%%:*}; $(KUBECTL) delete ns $$ns --ignore-not-found; done
 	@$(KUBECTL) delete -f deploy/40-collectors/instrumentation.yaml --ignore-not-found 2>/dev/null || true
 	@$(KUBECTL) delete -f deploy/40-collectors/gateways.yaml --ignore-not-found 2>/dev/null || true
 	@$(HELM) uninstall grafana -n $(NS_OBS) 2>/dev/null || true
+	@$(KUBECTL) delete -f deploy/45-keycloak/keycloak.yaml --ignore-not-found 2>/dev/null || true
 	@$(HELM) uninstall tempo -n $(NS_OBS) 2>/dev/null || true
 	@$(HELM) uninstall loki -n $(NS_OBS) 2>/dev/null || true
 	@$(KUBECTL) delete -f deploy/20-backends/mimir/mimir.deployment.yaml --ignore-not-found 2>/dev/null || true
@@ -195,5 +242,5 @@ nuke: ## Delete the entire minikube cluster
 reset: nuke up ## Destroy and rebuild everything from scratch
 
 .PHONY: help check-tools minikube-start repos namespaces storage backends operator \
-	collectors grafana build workloads up status grafana-forward rustfs-console \
-	smoke logs-bootstrap down nuke reset
+	collectors keycloak grafana build workloads ingress up status grafana-forward \
+	keycloak-info rustfs-console smoke logs-bootstrap down nuke reset

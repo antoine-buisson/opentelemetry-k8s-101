@@ -7,6 +7,10 @@
 adminUser: admin
 adminPassword: admin
 
+# The chart refuses inline secrets by default; the OAuth client_secret below is a demo value,
+# so disable that client-side assertion. (For real use, inject it via env/secret instead.)
+assertNoLeakedSecrets: false
+
 persistence:
   enabled: true
   storageClassName: standard
@@ -24,12 +28,52 @@ datasources: {}
 dashboardProviders: {}
 
 grafana.ini:
+  server:
+    # Grafana is reached by the browser at localhost:3000 (port-forward); the OAuth redirect
+    # URI is built from this, so it must match the client's redirectUris in the Keycloak realm.
+    root_url: http://localhost:3000/
   analytics:
     reporting_enabled: false
     check_for_updates: false
   users:
     # Let users belonging to multiple orgs switch between them in the UI.
     allow_org_create: false
-  # Keep the default login form (username/password) for the demo users.
+  # Local login form stays enabled (admin/admin fallback) alongside Keycloak SSO.
   auth.anonymous:
     enabled: false
+  auth:
+    # Link a Keycloak login to the pre-created local user with the same email (instead of
+    # trying to create a duplicate and colliding on the login). Fine for this trusted demo IdP.
+    oauth_allow_insecure_email_lookup: true
+
+  # ---- Keycloak SSO (OpenID Connect) --------------------------------------------------
+  # Group membership from Keycloak drives the Grafana org (tenant) + role via org_mapping.
+  # auth_url/token_url/api_url are placeholders here; the Makefile overrides them at deploy
+  # time with http://<minikube-ip>:30080/... (a URL both browser and pod can reach).
+  auth.generic_oauth:
+    enabled: true
+    name: Keycloak
+    allow_sign_up: true
+    client_id: grafana
+    client_secret: grafana-demo-secret
+    scopes: openid email profile
+    use_pkce: true
+    # auth_url is browser-facing -> the Makefile overrides it with the Keycloak ingress host.
+    auth_url: http://REPLACE_AT_DEPLOY/realms/otel-101/protocol/openid-connect/auth
+    # token_url/api_url are server-to-server -> in-cluster DNS (robust, no ingress round-trip).
+    # generic_oauth does not validate the issuer, so the browser/server URL split is fine.
+    token_url: http://keycloak.observability.svc.cluster.local:8080/realms/otel-101/protocol/openid-connect/token
+    api_url: http://keycloak.observability.svc.cluster.local:8080/realms/otel-101/protocol/openid-connect/userinfo
+    # Identity claims from Keycloak.
+    login_attribute_path: preferred_username
+    email_attribute_path: email
+    groups_attribute_path: groups
+    # Map Keycloak groups -> Grafana org + role. Orgs are pre-created by the bootstrap Job.
+    # (JSON-array form is required because org names contain a space.)
+    org_attribute_path: groups
+    # Single line on purpose: Grafana wants a JSON array string, and a folded scalar would
+    # smuggle newlines into grafana.ini.
+    org_mapping: '["tenant-a-admins:Tenant A:Admin", "tenant-a-editors:Tenant A:Editor", "tenant-a-viewers:Tenant A:Viewer", "tenant-b-admins:Tenant B:Admin", "tenant-b-editors:Tenant B:Editor", "tenant-b-viewers:Tenant B:Viewer", "auditors:*:Viewer", "platform-admins:*:Admin"]'
+    # GrafanaAdmin (server admin) can only be granted via role_attribute_path.
+    allow_assign_grafana_admin: true
+    role_attribute_path: contains(groups[*], 'platform-admins') && 'GrafanaAdmin' || 'None'
