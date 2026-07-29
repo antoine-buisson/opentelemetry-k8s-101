@@ -1,0 +1,34 @@
+# RBAC for the single gateway OpenTelemetryCollector (name: gateway, ns: observability).
+# The ServiceAccount otel-gateway is used by two components inside the collector:
+#   - k8sattributes processor : pod/node metadata lookups to enrich signal resource attributes
+#   - prometheus receiver      : Kubernetes SD pod discovery for scrape target resolution
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-gateway
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-gateway
+rules:
+  - apiGroups: [""]
+    resources: [pods, nodes, nodes/proxy, services, endpoints, namespaces, replicationcontrollers]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [replicasets, deployments, statefulsets, daemonsets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-gateway
+subjects:
+  - kind: ServiceAccount
+    name: otel-gateway
+    namespace: observability

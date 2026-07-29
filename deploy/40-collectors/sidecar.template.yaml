@@ -1,0 +1,75 @@
+# Filelog sidecar collector — injected into any pod in this namespace annotated:
+#   sidecar.opentelemetry.io/inject: "filelog-sidecar"
+#
+# The sidecar mounts the shared app-logs emptyDir (defined in workload.template.yaml)
+# at /var/log/app and tails app.log, parsing JSON lines written by app.py's file
+# handler. Parsed logs are forwarded as OTLP to the central gateway collector.
+#
+# This models the "classic file logger" pattern: the app writes to a file and a
+# collector sidecar bridges it to the OTLP pipeline — no changes needed to the app's
+# log configuration.
+#
+# Rendered by the Makefile collectors target once per team in config/tenants.yaml.
+#   __NAMESPACE__  team namespace
+#   __SERVICE__    service name (payments / onboarding / trading / reporting)
+#   __TENANT__     tenant-a | tenant-b
+#   __TEAM__       team-1 | team-2
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: filelog-sidecar
+  namespace: __NAMESPACE__
+  labels:
+    otel-k8s-101/tenant: __TENANT__
+    otel-k8s-101/team: __TEAM__
+spec:
+  mode: sidecar
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 64Mi }
+  # Mount the emptyDir volume already defined in the workload pod spec.
+  # The operator adds this volumeMount to the injected sidecar container only
+  # (the volume itself is not redeclared here — it already exists in the pod spec).
+  volumeMounts:
+    - name: app-logs
+      mountPath: /var/log/app
+      readOnly: true
+  config:
+    receivers:
+      filelog:
+        include: [/var/log/app/*.log]
+        start_at: beginning
+        operators:
+          # Parse the JSON object written by app.py's _JsonFormatter.
+          - type: json_parser
+            severity:
+              parse_from: attributes.level
+          # Promote the log message to the OTLP log body.
+          - type: move
+            from: attributes.msg
+            to: body
+          # Clean up fields already promoted or redundant.
+          - type: remove
+            field: attributes.time
+          - type: remove
+            field: attributes.level
+          - type: remove
+            field: attributes.service
+
+    processors:
+      resource:
+        attributes:
+          - { key: tenant,       value: __TENANT__,  action: upsert }
+          - { key: team,         value: __TEAM__,    action: upsert }
+          - { key: service.name, value: __SERVICE__, action: upsert }
+
+    exporters:
+      otlphttp:
+        endpoint: http://gateway-collector.observability.svc.cluster.local:4318
+
+    service:
+      pipelines:
+        logs:
+          receivers: [filelog]
+          processors: [resource]
+          exporters: [otlphttp]

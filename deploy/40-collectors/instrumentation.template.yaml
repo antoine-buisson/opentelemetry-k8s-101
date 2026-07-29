@@ -1,8 +1,19 @@
-# One Instrumentation CR per TEAM namespace. The OTEL Operator injects the Python SDK into pods
-# annotated `instrumentation.opentelemetry.io/inject-python: "true"` and points them at their
-# team's gateway. Rendered by the Makefile `collectors` target from config/tenants.yaml.
-#   __NAMESPACE__  team namespace     __GATEWAY__  gateway-<namespace> (its collector's name)
-#   __TENANT__     tenant-a|tenant-b  __TEAM__     team-1|team-2
+# One Instrumentation CR per TEAM namespace. The OTEL Operator injects the Python SDK
+# into pods annotated `instrumentation.opentelemetry.io/inject-python: "true"`.
+#
+# Signal breakdown after the classic-signals migration:
+#   traces  -> OTLP auto-instrumentation (Flask + requests HTTP spans) via this CR
+#              + Jaeger-format business spans emitted manually in app.py
+#   metrics -> Prometheus scrape on :9090 (prometheus_client) — NOT OTLP
+#   logs    -> filelog sidecar tails /var/log/app/app.log — NOT OTLP
+#
+# All teams share the single gateway collector; the routing connector inside it
+# uses the tenant/team resource attributes to fan out to the correct backend tenant.
+#
+# Rendered by the Makefile collectors target from config/tenants.yaml.
+#   __NAMESPACE__  team namespace
+#   __TENANT__     tenant-a | tenant-b
+#   __TEAM__       team-1 | team-2
 apiVersion: opentelemetry.io/v1alpha1
 kind: Instrumentation
 metadata:
@@ -10,7 +21,7 @@ metadata:
   namespace: __NAMESPACE__
 spec:
   exporter:
-    endpoint: http://__GATEWAY__-collector.observability.svc.cluster.local:4318
+    endpoint: http://gateway-collector.observability.svc.cluster.local:4318
   propagators: [tracecontext, baggage]
   sampler:
     type: parentbased_always_on
@@ -20,8 +31,6 @@ spec:
       team: __TEAM__
   env:
     - { name: OTEL_EXPORTER_OTLP_PROTOCOL, value: http/protobuf }
-    - { name: OTEL_METRICS_EXPORTER, value: otlp }
-    - { name: OTEL_LOGS_EXPORTER, value: otlp }
-    - { name: OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED, value: "true" }
-    # Record exemplars (metric sample -> trace id) so metrics can link to traces.
-    - { name: OTEL_METRICS_EXEMPLAR_FILTER, value: trace_based }
+    # Traces only: metrics and logs use classic formats (Prometheus scrape + filelog sidecar).
+    - { name: OTEL_METRICS_EXPORTER, value: none }
+    - { name: OTEL_LOGS_EXPORTER,    value: none }

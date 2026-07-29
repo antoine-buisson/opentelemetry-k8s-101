@@ -1,9 +1,12 @@
 # Per-team synthetic workload. The Makefile renders this once per team (substituting the
 # __PLACEHOLDERS__) from the list that mirrors config/tenants.yaml.
 #
-# The annotation is the ONLY thing wiring in OpenTelemetry: it tells the operator to inject
-# the Python SDK + auto-instrumentation, using the Instrumentation CR named "python" that
-# lives in this same namespace (deploy/40-collectors/instrumentation.yaml).
+# Three classic signal paths are wired in via annotations and volumes:
+#   1. OTLP traces   : inject-python annotation → auto-instrumentation via Instrumentation CR
+#   2. Prometheus     : prometheus.io/* annotations → gateway collector scrapes :9090/metrics
+#   3. File logs      : app-logs emptyDir + filelog-sidecar injection → sidecar tails the file
+#
+# The app also exports Jaeger-format spans directly to the gateway (configured in app.py).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,19 +28,37 @@ spec:
         otel-k8s-101/tenant: __TENANT__
         otel-k8s-101/team: __TEAM__
       annotations:
+        # OTLP trace auto-instrumentation (Flask + requests spans).
         instrumentation.opentelemetry.io/inject-python: "true"
+        # Inject the filelog sidecar collector (reads /var/log/app/app.log via the shared emptyDir).
+        sidecar.opentelemetry.io/inject: "filelog-sidecar"
+        # Tell the gateway collector's Prometheus receiver to scrape this pod.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
     spec:
+      volumes:
+        # Shared between the app container (writes) and the filelog sidecar (reads).
+        - name: app-logs
+          emptyDir: {}
       containers:
         - name: app
           image: otel-synthetic:latest
-          imagePullPolicy: IfNotPresent   # image is built into minikube's docker; never pull
+          imagePullPolicy: IfNotPresent
           env:
             - name: OTEL_SERVICE_NAME
               value: __SERVICE__
             - name: APP_PORT
               value: "8080"
+            - name: JAEGER_ENDPOINT
+              value: http://gateway-collector.observability.svc.cluster.local:14268/api/traces
           ports:
             - containerPort: 8080
+            - containerPort: 9090
+              name: prometheus
+          volumeMounts:
+            - name: app-logs
+              mountPath: /var/log/app
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 5

@@ -112,17 +112,27 @@ operator: repos ## Install the OpenTelemetry Operator
 	@echo "   waiting for the operator webhook to settle..."
 	@sleep 15
 
-collectors: ## Deploy per-team gateway collectors + Instrumentation CRs
-	@echo ">> Per-team gateway collectors + Instrumentation CRs"
+gateway-config: ## Regenerate deploy/40-collectors/gateway.yaml from config/tenants.yaml
+	@echo ">> Generating single-gateway config from tenants.yaml"
+	@docker run --rm -v "$$PWD":/w -w /w python:3.12-slim \
+		sh -c 'pip install -q pyyaml && python tools/generate-gateway-config.py config/tenants.yaml deploy/40-collectors/gateway.yaml'
+	@echo "   Generated deploy/40-collectors/gateway.yaml"
+
+collectors: gateway-config ## Deploy single gateway collector + Instrumentation CRs + filelog sidecars
+	@echo ">> RBAC for the gateway collector (k8sattributes + Prometheus SD)"
+	@$(KUBECTL) apply -f deploy/40-collectors/gateway-rbac.yaml
+	@echo ">> Single gateway collector (routing connector, all teams)"
+	@$(KUBECTL) apply -f deploy/40-collectors/gateway.yaml
+	@echo ">> Per-team Instrumentation CRs + filelog sidecars"
 	@for t in $(TEAMS); do \
 		ns=$${t%%:*}; rest=$${t#*:}; svc=$${rest%%:*}; rest=$${rest#*:}; tenant=$${rest%%:*}; team=$${rest#*:}; \
-		echo "   $$tenant/$$team -> X-Scope-OrgID=$$ns (gateway-$$ns)"; \
-		sed -e "s/__NAME__/gateway-$$ns/g" -e "s/__TENANT_ID__/$$ns/g" \
-		    -e "s/__TENANT__/$$tenant/g" -e "s/__TEAM__/$$team/g" \
-		    deploy/40-collectors/gateway.template.yaml | $(KUBECTL) apply -f - ; \
-		sed -e "s/__NAMESPACE__/$$ns/g" -e "s/__GATEWAY__/gateway-$$ns/g" \
+		echo "   $$tenant/$$team -> instrumentation + filelog-sidecar (ns=$$ns)"; \
+		sed -e "s/__NAMESPACE__/$$ns/g" \
 		    -e "s/__TENANT__/$$tenant/g" -e "s/__TEAM__/$$team/g" \
 		    deploy/40-collectors/instrumentation.template.yaml | $(KUBECTL) apply -f - ; \
+		sed -e "s/__NAMESPACE__/$$ns/g" -e "s/__SERVICE__/$$svc/g" \
+		    -e "s/__TENANT__/$$tenant/g" -e "s/__TEAM__/$$team/g" \
+		    deploy/40-collectors/sidecar.template.yaml | $(KUBECTL) apply -f - ; \
 	done
 
 keycloak: namespaces ## Deploy Keycloak (OIDC) with a realm generated from tenants.yaml
@@ -245,7 +255,10 @@ down: ## Remove the stack but keep the minikube cluster
 	@echo ">> Removing workloads, collectors, backends, storage, grafana, operator"
 	@$(KUBECTL) -n $(NS_OBS) delete ingress grafana keycloak --ignore-not-found 2>/dev/null || true
 	@for t in $(TEAMS); do ns=$${t%%:*}; $(KUBECTL) delete ns $$ns --ignore-not-found; done
-	@# per-team gateway collectors + Instrumentation CRs are removed with their namespaces below
+	@# gateway CR (observability ns) + Instrumentation/sidecar CRs (team namespaces) all removed with their namespaces
+	@# ClusterRole + ClusterRoleBinding are cluster-scoped; delete them explicitly.
+	@$(KUBECTL) delete clusterrole otel-gateway --ignore-not-found 2>/dev/null || true
+	@$(KUBECTL) delete clusterrolebinding otel-gateway --ignore-not-found 2>/dev/null || true
 	@$(HELM) uninstall grafana -n $(NS_OBS) 2>/dev/null || true
 	@$(KUBECTL) delete -f deploy/45-keycloak/keycloak.yaml --ignore-not-found 2>/dev/null || true
 	@$(HELM) uninstall tempo -n $(NS_OBS) 2>/dev/null || true
@@ -261,5 +274,5 @@ nuke: ## Delete the entire minikube cluster
 reset: nuke up ## Destroy and rebuild everything from scratch
 
 .PHONY: help check-tools minikube-start repos namespaces storage backends operator \
-	collectors keycloak grafana build workloads ingress up status grafana-forward \
+	gateway-config collectors keycloak grafana build workloads ingress up status grafana-forward \
 	keycloak-info rustfs-console smoke logs-bootstrap down nuke reset
